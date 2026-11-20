@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "//": "Tests are typechecked by the root tsconfig.test.json, not emitted here — a compiled test in dist gets collected and run twice.",
+  "exclude": ["src/**/*.test.ts"]
+}

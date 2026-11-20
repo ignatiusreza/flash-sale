@@ -1,0 +1,50 @@
+# Local stack for development and integration tests.
+#
+# A single RabbitMQ node: production runs a three-node quorum cluster
+# (docs/PLAN.md §5.1), which is a documented decision rather than something
+# the reviewer should have to wait for on first run.
+#
+# Every service is pinned to UTC. Postgres additionally sets its own timezone,
+# because TZ alone does not govern the server's `timezone` setting and
+# docs/PLAN.md §9.1 requires both.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: flashsale
+      POSTGRES_PASSWORD: flashsale
+      POSTGRES_DB: flashsale
+      TZ: UTC
+      PGTZ: UTC
+    command: ['postgres', '-c', 'timezone=UTC']
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U flashsale -d flashsale']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: flashsale
+      RABBITMQ_DEFAULT_PASS: flashsale
+      TZ: UTC
+    ports:
+      - '${RABBITMQ_PORT:-5672}:5672'
+      - '${RABBITMQ_UI_PORT:-15672}:15672'
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
