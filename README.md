@@ -20,11 +20,23 @@ docker compose up -d --wait   # Postgres + RabbitMQ
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```
 
-If ports 5432 or 5672 are already taken on your machine, override them — Compose reads a `.env` file in the repo root, so this can be set once rather than on every command:
+**No host port is pinned**, so this cannot clash with a Postgres or RabbitMQ already running on your machine. Docker assigns a free one; ask it which:
 
 ```sh
-POSTGRES_PORT=5433 RABBITMQ_PORT=5673 RABBITMQ_UI_PORT=15673 docker compose up -d --wait
+docker compose port postgres 5432     # e.g. 0.0.0.0:32770
+docker compose port rabbitmq 15672    # management UI
 ```
+
+### Running the gates inside Docker
+
+The `runner` service builds the `test` stage of the `Dockerfile` and reaches the services **by name** over the compose network, so no host port is involved at all:
+
+```sh
+docker compose run --rm runner              # the whole verify gate
+docker compose run --rm runner pnpm test    # or any other script
+```
+
+`tests/integration/services.test.ts` asserts exactly that — it is skipped on a bare checkout and runs here. The `Dockerfile` also has `api` and `worker` targets that ship production dependencies only; neither has a server to run until phases 2–4.
 
 ### Or use the devcontainer
 
