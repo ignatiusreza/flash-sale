@@ -15,6 +15,32 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
+
+    # Without these the integration tests — including the two invariant tests
+    # that are the whole point of the exercise — would silently skip in CI.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: flashsale
+          POSTGRES_PASSWORD: flashsale
+          POSTGRES_DB: flashsale
+          TZ: UTC
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U flashsale -d flashsale"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      rabbitmq:
+        image: rabbitmq:4-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: flashsale
+          RABBITMQ_DEFAULT_PASS: flashsale
+          TZ: UTC
+        ports: ['5672:5672']
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_running"
+          --health-interval 5s --health-timeout 10s --health-retries 30
+
     steps:
       - uses: actions/checkout@v7
 
@@ -45,11 +71,15 @@ jobs:
         run: pnpm test
         env:
           TZ: UTC
+          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432/flashsale
+          RABBITMQ_URL: amqp://flashsale:flashsale@localhost:5672
 
       - name: Test (non-UTC)
         run: pnpm test
         env:
           TZ: America/St_Johns
+          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432/flashsale
+          RABBITMQ_URL: amqp://flashsale:flashsale@localhost:5672
 
       - name: Licences
         run: pnpm licenses:check

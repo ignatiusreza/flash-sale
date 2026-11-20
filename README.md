@@ -4,7 +4,18 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 0 of 8.** Scaffolding and CI gates only. The claim core, queue, API, WebSocket layer and frontend land in phases 1–5; see `docs/PLAN.md` §13.
+> **Status: phase 1 of 8.** The claim is implemented and its invariants are proven; the queue, API, WebSocket layer and frontend land in phases 2–5. See `docs/PLAN.md` §13.
+
+## The claim
+
+`apps/worker/src/claim.ts` is the heart of the system: a single SQL statement that claims up to N units in arrival order, decrementing stock by the rows it *actually* inserted rather than by the batch size — which is what makes a redelivered batch a no-op instead of silently destroying stock.
+
+Two tests in `apps/worker/src/claim.test.ts` are the ones that matter, and both run in CI against a real Postgres:
+
+- **never oversells** — 20 000 attempts against stock of 1000 yields exactly 1000 grants, 1000 distinct users, and `remaining` at 0.
+- **never grants one user two units** — 500 concurrent attempts from a single user yield exactly one order.
+
+The first asserts on grants *returned to callers* as well as rows in the table. Both halves are needed: `docs/prototype/postgres-pool/` contains a claim that oversells 9.5× while leaving the table immaculate, so a row-count assertion alone would pass it.
 
 ## Requirements
 
