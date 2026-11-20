@@ -1,5 +1,10 @@
 {
   "//": "Solution file. `tsc -b` builds the composite projects in dependency order; apps/web is checked separately because a noEmit project cannot be composite.",
   "files": [],
-  "references": [{ "path": "packages/core" }, { "path": "apps/api" }, { "path": "apps/worker" }]
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/messaging" },
+    { "path": "apps/api" },
+    { "path": "apps/worker" }
+  ]
 }

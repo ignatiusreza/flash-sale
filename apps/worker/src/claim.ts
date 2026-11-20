@@ -12,6 +12,9 @@ export interface ClaimResult {
   readonly remaining: number;
   /** False when the sale window is closed; then nothing is ever granted. */
   readonly open: boolean;
+  /** The window, so callers can tell *not started* from *ended*. ISO 8601, UTC. */
+  readonly startAt: string;
+  readonly endAt: string;
 }
 
 /**
@@ -43,7 +46,7 @@ WITH input AS (
   FROM unnest($2::text[]) WITH ORDINALITY AS t(user_id, ord)
 ),
 locked AS (
-  SELECT remaining, (now() >= start_at AND now() < end_at) AS open
+  SELECT remaining, start_at, end_at, (now() >= start_at AND now() < end_at) AS open
   FROM sales WHERE id = $1
   FOR UPDATE
 ),
@@ -64,6 +67,8 @@ WHERE id = $1
 RETURNING
   remaining,
   (SELECT open FROM locked) AS open,
+  (SELECT start_at FROM locked) AS start_at,
+  (SELECT end_at FROM locked) AS end_at,
   COALESCE(
     (SELECT json_agg(json_build_object('orderId', id, 'userId', user_id)) FROM ins),
     '[]'::json
@@ -73,6 +78,8 @@ RETURNING
 interface ClaimRow {
   remaining: number;
   open: boolean;
+  start_at: Date;
+  end_at: Date;
   granted: Grant[];
 }
 
@@ -91,7 +98,32 @@ export async function claimBatch(
     throw new Error(`no such sale: ${saleId}`);
   }
 
-  return { granted: row.granted, remaining: row.remaining, open: row.open };
+  return {
+    granted: row.granted,
+    remaining: row.remaining,
+    open: row.open,
+    startAt: row.start_at.toISOString(),
+    endAt: row.end_at.toISOString(),
+  };
+}
+
+/**
+ * Orders these users already hold. Used to tell "you already have one" — a
+ * success — apart from "sold out", which the claim alone cannot distinguish
+ * because `ON CONFLICT DO NOTHING` grants nothing in both cases.
+ *
+ * One query per batch, not per attempt.
+ */
+export async function findExistingOrders(
+  db: Queryable,
+  saleId: string,
+  userIds: readonly string[],
+): Promise<Map<string, string>> {
+  const { rows } = await db.query<{ user_id: string; id: string }>(
+    'SELECT user_id, id FROM orders WHERE sale_id = $1 AND user_id = ANY($2::text[])',
+    [saleId, [...userIds]],
+  );
+  return new Map(rows.map((r) => [r.user_id, r.id]));
 }
 
 /** A single claim is the batch with one element; there is no second statement to keep in step. */
