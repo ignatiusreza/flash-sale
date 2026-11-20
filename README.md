@@ -20,11 +20,17 @@ docker compose up -d --wait   # Postgres + RabbitMQ
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```
 
-If ports 5432 or 5672 are already taken on your machine, override them:
+If ports 5432 or 5672 are already taken on your machine, override them — Compose reads a `.env` file in the repo root, so this can be set once rather than on every command:
 
 ```sh
 POSTGRES_PORT=5433 RABBITMQ_PORT=5673 RABBITMQ_UI_PORT=15673 docker compose up -d --wait
 ```
+
+### Or use the devcontainer
+
+"Reopen in Container" in VS Code builds on the same `docker-compose.yml`, so the services are not a second copy that can drift from it. Node and pnpm match the versions CI uses, `pnpm install` runs on create, and the API and web ports are forwarded.
+
+Inside the container the services are reachable by name — `postgres:5432`, `rabbitmq:5672` — already wired up as `DATABASE_URL` and `RABBITMQ_URL`. Host port clashes cannot affect it, because nothing inside goes through the host mapping.
 
 ## Layout
 

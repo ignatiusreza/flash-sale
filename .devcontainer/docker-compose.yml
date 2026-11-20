@@ -1,0 +1,31 @@
+# Devcontainer overlay. Composed on top of the repo's docker-compose.yml, so
+# Postgres and RabbitMQ are the same services the stack already defines rather
+# than a second copy that can drift from it.
+#
+# Inside this network the services are reachable by name on their native ports,
+# which is why the URLs below say `postgres:5432` and not `localhost`. The host
+# port mappings in the base file are irrelevant here — and the reason a port
+# clash on the host cannot break the devcontainer.
+
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/typescript-node:5-24-bookworm
+    command: sleep infinity
+    init: true
+    volumes:
+      # `.`, not `..`: relative paths resolve against the Compose *project*
+      # directory — the first -f file's directory, which is the repo root —
+      # not against the file this line lives in.
+      - .:/workspace:cached
+    working_dir: /workspace
+    environment:
+      # Matches the services and production (docs/PLAN.md §9.1). CI is what
+      # covers the non-UTC case, by running the suite twice.
+      TZ: UTC
+      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432/flashsale
+      RABBITMQ_URL: amqp://flashsale:flashsale@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
