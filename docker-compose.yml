@@ -18,13 +18,18 @@ services:
       TZ: UTC
       PGTZ: UTC
     command: ['postgres', '-c', 'timezone=UTC']
-    # No host port is pinned: Docker picks a free one, so this can never clash
-    # with a Postgres already running on the host. Find it with
-    # `docker compose port postgres 5432`. Anything running inside the network
-    # — including the `runner` service — reaches it as `postgres:5432` and does
-    # not involve the host mapping at all.
+    # Published on a non-default host port so it cannot clash with a Postgres
+    # already running on 5432, and overridable if even this one is taken.
+    #
+    # Deliberately NOT an ephemeral `- '5432'`: Zed's dev-container support
+    # parses `docker compose config` with a deserializer that requires a
+    # `published` field on every port, and an unpublished port omits it, so the
+    # container fails to start with a YAML deserialization error.
+    #
+    # Nothing inside the network uses this mapping anyway — the `runner`
+    # service and the devcontainer reach it as `postgres:5432`.
     ports:
-      - '5432'
+      - '${POSTGRES_PORT:-15432}:5432'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U flashsale -d flashsale']
       interval: 2s
@@ -39,11 +44,11 @@ services:
       RABBITMQ_DEFAULT_USER: flashsale
       RABBITMQ_DEFAULT_PASS: flashsale
       TZ: UTC
-    # Ephemeral host ports, as above. `docker compose port rabbitmq 15672`
-    # gives the management UI.
+    # Non-default host ports, as above. 25672 is deliberately avoided: that is
+    # RabbitMQ's own Erlang distribution port and a host RabbitMQ holds it.
     ports:
-      - '5672'
-      - '15672'
+      - '${RABBITMQ_PORT:-15673}:5672'
+      - '${RABBITMQ_UI_PORT:-15674}:15672'
     healthcheck:
       test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
       interval: 5s

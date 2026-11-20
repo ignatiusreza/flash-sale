@@ -20,12 +20,17 @@ docker compose up -d --wait   # Postgres + RabbitMQ
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```
 
-**No host port is pinned**, so this cannot clash with a Postgres or RabbitMQ already running on your machine. Docker assigns a free one; ask it which:
+The services are published on **non-default host ports**, so they cannot clash with a Postgres or RabbitMQ already running on your machine:
 
-```sh
-docker compose port postgres 5432     # e.g. 0.0.0.0:32770
-docker compose port rabbitmq 15672    # management UI
-```
+| Service | Host | Override |
+| --- | --- | --- |
+| Postgres | `15432` | `POSTGRES_PORT` |
+| RabbitMQ | `15673` | `RABBITMQ_PORT` |
+| RabbitMQ management UI | `15674` | `RABBITMQ_UI_PORT` |
+
+Compose reads a `.env` file in the repo root, so an override can be set once rather than on every command.
+
+They are *published* rather than left ephemeral on purpose: Zed's dev-container support parses `docker compose config` with a deserializer that requires a `published` field on every port, and an unpublished port omits it — the container then fails to start with a YAML deserialization error.
 
 ### Running the gates inside Docker
 
