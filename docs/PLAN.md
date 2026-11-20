@@ -297,6 +297,8 @@ WebSocket events pushed to the client:
 
 `GET /api/sale` is cached in process and refreshed on the same 1 s timer as the sellout check, so the highest-volume endpoint costs no I/O per request. `serverTime` is returned so the frontend countdown does not trust the client clock.
 
+Every timestamp in these payloads — `startAt`, `endAt`, `serverTime`, `purchasedAt` — is ISO 8601 UTC with an explicit `Z` suffix, per §9.1. The API never emits a local time and never accepts one.
+
 ## 8. WebSocket transport and cross-instance delivery
 
 **Library: Socket.IO**, for reconnection, heartbeats and acknowledgements — all of which matter here because a socket dropping mid-purchase is routine, and hand-rolling reconnect on raw `ws` is a meaningful chunk of work for no credit.
@@ -334,11 +336,30 @@ CREATE INDEX ON orders (sale_id);
 
 The worker rebuilds its in-memory state on startup or promotion with two queries — `SELECT remaining FROM sales` and `SELECT user_id FROM orders WHERE sale_id = $1`. Both are bounded by `totalStock`, so promotion is fast.
 
+### 9.1 Time handling
+
+**Every instant is UTC from the database to the API boundary, and is localized only in the browser.** A sale that opens at a wall-clock time in one country and is bought from another gets this wrong in ways that are invisible until someone misses the sale, so the rule is worth stating as a constraint rather than a convention.
+
+**In the database.** Every column is `TIMESTAMPTZ`, never `TIMESTAMP`. This matters more than it looks: `TIMESTAMPTZ` does not store a timezone at all — it stores a UTC instant and converts on the way in and out using the session's `TimeZone`. `TIMESTAMP` stores a wall-clock reading with no instant attached, so two of them cannot be meaningfully compared across zones, and `node-postgres` parses one into a `Date` using *the Node process's* local zone, silently shifting the value. Using `TIMESTAMPTZ` everywhere makes UTC storage automatic.
+
+What is not automatic is the session zone, so it gets pinned in three places: `timezone = 'UTC'` in the server config, `TZ=UTC` in every container, and `options: '-c timezone=UTC'` on the connection pool. The last one is the one that actually protects us, since it survives being pointed at someone else's database.
+
+Two consequences of `now()` worth knowing:
+
+- It returns transaction start time, not wall clock. In a batched claim (§4.1) **all 100 rows share one `created_at`**, so `created_at` cannot break ties within a batch. Ordering within a batch comes from `id`, which is why §4.1 allocates by `ord` rather than by timestamp.
+- `clock_timestamp()` is the one that advances inside a transaction, and is wrong for `created_at` precisely because it would make rows in one commit disagree.
+
+**At the API boundary.** Every timestamp crosses as ISO 8601 with an explicit `Z` — `2026-11-20T10:00:00.000Z`. `JSON.stringify` already calls `toISOString()` on a `Date`, so the default is correct provided nothing hand-formats on the way out. No epoch integers (ambiguous units), no bare local strings, no offsets other than `Z`. Sale configuration is accepted the same way: an absolute instant, never a wall-clock reading plus an implied zone. Configuring in UTC also sidesteps the spring-forward case where the configured local time does not exist.
+
+**In the browser.** Parse to a `Date` and render with `Intl.DateTimeFormat`, using the zone and locale the browser resolves. Never assemble a string from `getHours()` and friends — that skips locale conventions and the 12/24-hour preference. Include `timeZoneName: 'short'`, because a user needs to know *which* zone the sale opens in, not just a number.
+
+**Clock skew and timezone are different problems, and only one of them is ours.** A browser with the wrong *timezone* still has a correct `Date.now()`, because the OS holds UTC underneath — so a timezone misconfiguration only ever corrupts display. A browser with a wrong *clock* has a wrong instant, which would corrupt a countdown. That is what `serverTime` is for (§10): take `offset = serverTime - Date.now()` on each poll and drive the countdown from `Date.now() + offset`, so the countdown stays right even on a device that is minutes out. The window check itself is never client-side, so a skewed clock can only ever mislead the user, never admit them early.
+
 ## 10. Frontend
 
 Deliberately small — the brief asks for a demonstration, not a storefront. Vite + React + TypeScript, one page:
 
-- Sale status and countdown driven off `serverTime`.
+- Sale status and countdown driven off `serverTime`, with start and end rendered in the viewer's own timezone and locale via `Intl.DateTimeFormat` and labelled with the zone (§9.1).
 - A `userId` input, persisted to `localStorage` so a refresh does not lose your identity.
 - A "Buy Now" button, disabled outside the active window and while a request is in flight.
 - An explicit **queued** state between `202` and the WebSocket result — this is the honest representation of what the system is doing, and it is where a real flash sale shows a spinner.
@@ -349,6 +370,8 @@ Deliberately small — the brief asks for a demonstration, not a storefront. Vit
 ## 11. Testing strategy
 
 **Unit (Vitest).** Window/status derivation, the monotonic sellout flag state machine, presence aggregation and stale-instance expiry, result-to-UI-state mapping. Fast, no I/O.
+
+**The whole suite runs under a deliberately non-UTC `TZ`** — something with an awkward offset and DST, say `TZ=America/St_Johns` or `Pacific/Chatham`. A test suite that only passes in UTC cannot catch code that accidentally depends on the process's local zone, which is the exact bug §9.1 exists to prevent. CI runs it both ways: once in UTC, once shifted.
 
 **Integration (Vitest against real RabbitMQ and Postgres via docker-compose).** The claim statement, worker batching, consumer failover, and — importantly — **redelivery idempotency**: ack a message only after commit, kill the worker between the two, and assert the redelivered message produces no second order.
 
@@ -380,7 +403,7 @@ docs/
 docker-compose.yml   README.md
 ```
 
-pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend.
+pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
 
 Two infrastructure components, not three — dropping Redis is a direct consequence of the queue owning the decision, and it is worth calling out in the README as a simplification rather than leaving it unremarked.
 
