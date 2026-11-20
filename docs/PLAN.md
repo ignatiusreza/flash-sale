@@ -382,6 +382,29 @@ Deliberately small — the brief asks for a demonstration, not a storefront. Vit
 
 Both already hold at the SQL layer — `prototype/postgres-claim/` demonstrates 20 000 attempts producing exactly 1000 orders — so the integration versions are testing the queue and worker wiring, not the claim itself.
 
+**End-to-end (Playwright, against the full docker-compose stack).** The third layer, and the only one that can see what this design is actually unusual for: a purchase that resolves over a WebSocket rather than in the HTTP response. Integration tests prove the queue and the claim are correct; they cannot prove the user ever finds out.
+
+What belongs here, in rough order of value:
+
+| Spec | What it proves |
+|---|---|
+| `purchase` | The async flow end to end: click → `202` → **queued** state visible → `purchase:result` arrives → confirmed with an order id. The intermediate state is the point; it is the one thing a synchronous design would not have. |
+| `reconnect` | **The critical resilience path.** Drop the socket mid-purchase with `context.setOffline(true)`, restore it, and assert the client re-syncs through `GET /api/purchase/:userId` and lands on the correct terminal state. §5 claims a dropped socket is cosmetic — this is what makes that a verified claim rather than an assertion. |
+| `concurrency` | Several browser contexts race for the last units. One wins, the others see *sold out*. Tests the UI's handling of losing, not the invariant. |
+| `presence` | Open three contexts, assert the viewer count converges to three; close one, assert it falls. The §8 fanout aggregation has no other honest test. |
+| `lifecycle` | *upcoming → active → ended* observed live, without a reload. |
+| `time` | Launch contexts with `timezoneId: 'Asia/Tokyo'` and `'America/St_Johns'` and assert the same instant renders correctly in each, labelled with its zone. Then use Playwright's clock API to skew the browser clock and assert the countdown stays correct — which is exactly the §9.1 claim that skew corrupts a countdown while timezone only corrupts display. |
+| `rejection` | *not started*, *ended*, *already purchased*, and a `503` under load shedding each produce the right message rather than a stack trace. |
+| `double-click` | The button disables in flight; two rapid clicks produce exactly one `POST`. |
+
+Three rules keep this layer from becoming a liability:
+
+- **It tests the experience, never the invariant.** The oversell proof stays in integration and stress, where 20 000 attempts cost nothing. Twenty thousand browsers is not a test, it is a denial of service against your own CI. A race between five contexts for two units is legitimate E2E; a race between twenty thousand is not.
+- **No fixed sleeps, ever.** WebSocket arrival time is nondeterministic, so every assertion goes through Playwright's retrying `expect`. A flaky E2E suite is worse than none, because it trains people to re-run red builds.
+- **Each spec seeds its own sale.** A test-only reset endpoint behind `ENABLE_TEST_ENDPOINTS`, never enabled in a deployed environment, gives each spec a fresh sale with known stock and window. Tests that share mutable state across a queue and a worker will interfere in ways that look like real bugs.
+
+Playwright can also observe the socket directly — `page.on('websocket', ws => ws.on('framereceived', …))` — which is worth wiring into the fixtures as a diagnostic. When a UI assertion fails it immediately separates "the server never sent it" from "the client ignored it", and those have very different fixes. Socket.IO frames carry Engine.IO encoding, so the UI state stays the primary assertion and frames are for triage.
+
 **Stress (k6).** Ramp to high concurrency over ~60 s with thresholds encoded as pass/fail, driving HTTP for attempts and holding WebSocket connections for results, so the measured latency is genuinely end-to-end rather than time-to-`202`. A teardown asserts the same invariants at realistic load. Results and their interpretation go into the README.
 
 **Load shedding is a test case, not an afterthought.** Drive past the queue bound and assert the API returns `503` cleanly, memory stays flat, and no attempt is silently dropped.
@@ -397,13 +420,14 @@ packages/
   core/       domain types, status logic, config schema, shared message contracts
 tests/
   integration/
+  e2e/        Playwright specs + seeded-sale fixtures
   stress/     k6 scenarios
 docs/
   REQUIREMENT.md  PLAN.md  prototype/
 docker-compose.yml   README.md
 ```
 
-pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
+pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
 
 Two infrastructure components, not three — dropping Redis is a direct consequence of the queue owning the decision, and it is worth calling out in the README as a simplification rather than leaving it unremarked.
 
@@ -419,10 +443,13 @@ Ordered so the risky part is proven first. Estimates are for a focused build.
 | 3 | API | Fastify routes, three-tier early rejection, rate limiting, status cache | 2–3 h |
 | 4 | WebSocket | Socket.IO, fanout consumption, local socket map, presence aggregation | 2–3 h |
 | 5 | Frontend | React page, queued state, terminal states, viewer count | 2–3 h |
-| 6 | Stress | k6 scenarios incl. WebSocket result latency and load shedding | 2–3 h |
-| 7 | Write-up | README, Mermaid diagram, trade-offs, run instructions, stress summary | 2 h |
+| 6 | **E2E** | Playwright: purchase flow, reconnect, presence, timezone/clock, rejections; test-only seed endpoint | 2–3 h |
+| 7 | Stress | k6 scenarios incl. WebSocket result latency and load shedding | 2–3 h |
+| 8 | Write-up | README, Mermaid diagram, trade-offs, run instructions, stress summary | 2 h |
 
-If time runs short, phases 5–6 get trimmed before 1–2 give up any ground. The presence feature (§8) is the first thing to cut — it is the one piece not traceable to a requirement.
+E2E lands immediately after the frontend because the two are written against the same states, and because the `reconnect` spec is the cheapest way to find out whether §5's "a dropped socket is cosmetic" is actually true before the stress run depends on it.
+
+If time runs short, phase 7 is trimmed before 1–2 or 6 give up any ground: a stress number is a claim about capacity, while E2E is a claim about the system working at all, and the second is worth more when something has to go. Within phase 6, the `purchase` and `reconnect` specs are the two that justify the layer; the rest are additive. The presence feature (§8) remains the first thing to cut overall — it is the one piece not traceable to a requirement.
 
 ## 14. Explicitly out of scope
 
@@ -491,8 +518,8 @@ One operational note: payment concurrency is capped by the PSP's own rate limit,
 Nothing here blocks a start; each has a stated default I will proceed under.
 
 1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with in-memory adapters for the queue and store so unit tests run with no containers.*
-2. **How long is the exercise meant to take?** The phasing above is ~17 hours. *Default: build phases 0–4 and 7 to a high standard, then 5–6 as time allows.*
-3. **Should the stress test run in CI?** It needs sustained load and will be slow and noisy on shared runners. *Default: the two invariant tests run in CI; the full k6 run is manual, with its results committed.*
+2. **How long is the exercise meant to take?** The phasing above is ~20 hours. *Default: build phases 0–6 and 8 to a high standard, then 7 as time allows.*
+3. **Should the stress test run in CI?** It needs sustained load and will be slow and noisy on shared runners. *Default: unit, integration, the two invariant tests and the Playwright suite all run in CI — the E2E layer is slow in wall-clock terms but not load-sensitive, so it is reliable on a shared runner in a way k6 is not. The full k6 run stays manual, with its results committed.*
 4. **How large is the batch window?** 100 claims per transaction and a 5 ms flush are what §4.2 assumes and §4.3 measures, but the pair trades latency against throughput and the right values depend on burst shape. *Default: ship those, instrument batch-size distribution and flush-reason, and tune against the stress results rather than guessing up front.*
 5. **Counter row, or a pool of claimable rows?** [`prototype/postgres-pool/`](./prototype/postgres-pool/) measures pre-warming stock as `user_id IS NULL` order rows claimed with `FOR UPDATE SKIP LOCKED`. It reaches 61k claims/s batched across 10 workers — ~1.5× this plan's design — and, because it removes the contended counter row, it also removes the main reason the queue exists. *Resolved by §15.2: the deciding question is not throughput but whether a unit needs a lifecycle. For the brief as written there is no payment step, so the counter stays. If payment is ever in scope, switch to the pool — reservations need per-unit state, and the batching advantage that favours the counter stops mattering once the PSP is the bottleneck.*
 
