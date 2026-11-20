@@ -82,6 +82,14 @@ Not here, but worth being able to say where:
 - **Rich, variable order documents.** If an order grew per-campaign attributes and nested fulfilment state, the document model would start paying for itself. For `{id, sale_id, user_id, created_at}` it earns nothing.
 - **Horizontal write sharding** beyond a single primary. At 1000 units this is not a problem anyone has.
 
+## A licensing dimension the benchmark does not show
+
+Worth stating because `CLAUDE.md` forbids copyleft dependencies, and the measurement above is silent on it.
+
+PostgreSQL ships under the PostgreSQL Licence, which is permissive and BSD-like. MongoDB's **server** moved to the SSPL, which is aggressively copyleft for anyone offering the software as a service and is not OSI-approved. The **Node driver** (`mongodb`) is Apache-2.0, so the dependency allowlist would not flag it — the obligation attaches to running and especially to distributing the server, not to the client library.
+
+For a self-hosted take-home this changes nothing. For a product it is a question someone in legal has to answer, and it is a cost that only appears after the engine is already load-bearing. It is not the reason to pick Postgres, but it is one more thing Postgres does not ask of you.
+
 ## Why Postgres wins for this workload
 
 The shape of the problem is a small amount of highly-contended data with hard invariants and a fixed schema. Every Postgres strength applies directly — transactional multi-row writes, `CHECK` and `UNIQUE` as independent durable enforcers the application cannot bypass, `SKIP LOCKED` for contention, and ordinary SQL for reporting afterwards. None of MongoDB's strengths do: there is no schema flexibility to exploit, no document-shaped aggregate, and nothing to shard.

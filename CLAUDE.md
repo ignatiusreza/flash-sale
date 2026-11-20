@@ -12,6 +12,10 @@ Take-home: a high-throughput flash sale system. `docs/REQUIREMENT.md` is the bri
 ## Dependencies
 
 - **No known-vulnerable dependencies.** `pnpm audit --audit-level=high` runs in CI and fails the build. Fix it or justify it in the PR; never silence it.
+- **No copyleft dependencies.** CI checks `pnpm licenses list` against an **allowlist**, not a denylist: MIT, ISC, Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, Unlicense, CC0-1.0, BlueOak-1.0.0. Deny-by-default is the point — an unrecognised or missing `license` field fails the build instead of slipping through, and copyleft almost never arrives as a direct dependency, it arrives five levels down.
+  - Hard block: GPL, AGPL, SSPL, and anything non-commercial.
+  - Needs a decision rather than a default: LGPL and MPL-2.0. Note that bundling is *static* linking, so LGPL's relinking obligation bites in a bundled frontend in a way it does not in a dynamically-linked native application.
+  - **This rule is about linked code, not services.** Postgres and RabbitMQ run as separate processes we talk to over a wire protocol, so their licences do not propagate into ours. Shipping one *inside* an artefact we distribute is a different question and needs its own answer.
 - **No prerelease direct dependencies** — no `rc`, `beta` or `alpha`.
 - **Prefer `^` ranges.** Pin exactly only when something concrete forces it, and say what in the PR.
 - **Lockfile is committed.** CI installs with `--frozen-lockfile`.

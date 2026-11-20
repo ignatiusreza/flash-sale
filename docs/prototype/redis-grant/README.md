@@ -39,6 +39,10 @@ Two secondary costs reinforced the decision:
 - **Two systems, no transaction between them.** Grant in Redis, persist via the stream — the `XADD` being inside the Lua script is what keeps those atomic, which works, but it means the pending-persistence queue shares a failure domain with the decision itself. One Redis outage takes out both.
 - **An extra component.** Redis would be a third piece of infrastructure alongside RabbitMQ and Postgres. Since the queue can own the decision outright, it is not needed at all.
 
+## One more thing to check before adopting it
+
+Redis's licence moved away from BSD in 2024 and has changed again since. Anything that reintroduces Redis — including the admission filter below — needs its current licence confirmed against the policy in [`CLAUDE.md`](../../../CLAUDE.md) at the time of adoption, rather than on the assumption that it is still the permissive dependency it was for a decade. Valkey is the BSD-licensed fork and is API-compatible, so the Lua script here would run unchanged if that turns out to matter.
+
 ## Where it may yet come back
 
 Plan §15 keeps it as the second scaling route: placed *ahead* of RabbitMQ purely as an admission filter, it would reject losers in sub-millisecond time while winners still flow through the authoritative transaction. In that role the correctness objection disappears, because the Redis decision would be provisional rather than final. Worth doing only if the stress numbers demand it.
