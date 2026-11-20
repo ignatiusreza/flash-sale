@@ -427,7 +427,7 @@ docs/
 docker-compose.yml   README.md
 ```
 
-pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
+pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. ESLint flat config with `typescript-eslint` for correctness, Prettier for formatting and nothing else, `tsc --noEmit` under `strict`, and `pnpm audit --audit-level=high` — all four gating CI rather than advisory, per [`CLAUDE.md`](../CLAUDE.md). One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
 
 Two infrastructure components, not three — dropping Redis is a direct consequence of the queue owning the decision, and it is worth calling out in the README as a simplification rather than leaving it unremarked.
 
@@ -437,7 +437,7 @@ Ordered so the risky part is proven first. Estimates are for a focused build.
 
 | # | Phase | Output | Est. |
 |---|---|---|---|
-| 0 | Scaffold | pnpm workspaces, TS config, lint, docker-compose, CI | 1–2 h |
+| 0 | Scaffold | pnpm workspaces, strict TS, ESLint + Prettier, `pnpm audit` gate, docker-compose, CI | 1–2 h |
 | 1 | **Claim core** | Schema, migrations, claim statement, worker batching + both invariant tests — *statement already drafted and verified, §4* | 2 h |
 | 2 | Queue wiring | amqplib, publisher confirms, quorum queue declaration, single-active-consumer, bounded queue, redelivery idempotency tests | 2–3 h |
 | 3 | API | Fastify routes, three-tier early rejection, rate limiting, status cache | 2–3 h |
