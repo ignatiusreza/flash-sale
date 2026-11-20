@@ -1,0 +1,28 @@
+[
+  {
+    "label": "verify (everything CI runs)",
+    "command": "pnpm verify",
+    "reveal": "always"
+  },
+  {
+    "label": "test",
+    "command": "pnpm test",
+    "reveal": "always"
+  },
+  {
+    "label": "test (non-UTC timezone)",
+    "command": "pnpm test",
+    "env": { "TZ": "America/St_Johns" },
+    "reveal": "always"
+  },
+  {
+    "label": "stack up",
+    "command": "docker compose up -d --wait",
+    "reveal": "always"
+  },
+  {
+    "label": "stack down",
+    "command": "docker compose down",
+    "reveal": "always"
+  }
+]

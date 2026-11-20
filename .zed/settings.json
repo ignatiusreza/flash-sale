@@ -1,0 +1,28 @@
+{
+  "//": "Project settings for Zed. The VS Code equivalents live in .devcontainer/devcontainer.json under customizations.vscode; both exist so the repo's gates behave the same whichever editor you open it in.",
+
+  "format_on_save": "on",
+
+  // Zed uses the project's own Prettier, so .prettierrc.json and
+  // .prettierignore apply — including the markdown exclusion.
+  "prettier": {
+    "allowed": true
+  },
+
+  // Runs after Prettier, so the two do not fight: Prettier owns layout,
+  // ESLint owns correctness. Same split the CI gates enforce.
+  "languages": {
+    "TypeScript": {
+      "code_actions_on_format": { "source.fixAll.eslint": true }
+    },
+    "TSX": {
+      "code_actions_on_format": { "source.fixAll.eslint": true }
+    },
+    "JavaScript": {
+      "code_actions_on_format": { "source.fixAll.eslint": true }
+    }
+  },
+
+  // "..." extends Zed's defaults rather than replacing them.
+  "file_scan_exclusions": ["**/node_modules", "**/dist", "**/coverage", "**/*.tsbuildinfo", "..."]
+}

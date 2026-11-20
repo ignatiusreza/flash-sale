@@ -18,6 +18,12 @@ services:
       # not against the file this line lives in.
       - .:/workspace:cached
     working_dir: /workspace
+    # Published by Compose rather than left to the editor. VS Code honours
+    # `forwardPorts`, Zed's dev-container support has not consistently, and
+    # publishing here works for both — and for `docker compose` with no editor.
+    ports:
+      - '${API_PORT:-3000}:3000'
+      - '${WEB_PORT:-5173}:5173'
     environment:
       # Matches the services and production (docs/PLAN.md §9.1). CI is what
       # covers the non-UTC case, by running the suite twice.

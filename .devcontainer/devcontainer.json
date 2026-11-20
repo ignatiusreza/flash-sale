@@ -17,6 +17,7 @@
   "remoteUser": "node",
 
   "customizations": {
+    "//": "Zed reads this same file and has its own `zed` key here, but extensions declared under it also install into the local Zed instance, so project settings live in .zed/settings.json instead where they stay scoped to the project.",
     "vscode": {
       "extensions": [
         "dbaeumer.vscode-eslint",
