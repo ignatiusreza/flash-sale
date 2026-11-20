@@ -6,9 +6,9 @@ Companion to [REQUIREMENT.md](./REQUIREMENT.md). This is the plan I intend to bu
 
 The brief is small enough to brute-force with a single Postgres row and a `SELECT ... FOR UPDATE`. That would pass the functional tests and fail the exercise. The grading criteria name *System Design*, *Correctness under load*, *Testing*, and *Pragmatism* — so the deliverable has to make three things visible:
 
-1. **One serialization point, and it is cheap.** Every purchase must funnel through a single atomic decision. The design question is not *whether* to serialize but *where*, and how few microseconds it costs.
-2. **A failure story.** What breaks when the box holding that decision dies, and whether the breakage is oversell (unacceptable — you sold stock you do not have) or undersell (acceptable — stock returns, the user retries).
-3. **Tests that prove the invariant, not tests that exercise the happy path.** A stress test reporting "12k req/s, 0 errors" proves nothing. One that asserts `successes === stock` exactly, under 20× oversubscription, proves everything.
+1. **One serialization point, and it is in the right place.** Every purchase must funnel through a single ordered decision. The design question is not *whether* to serialize but *where*, and what that placement costs.
+2. **A failure story.** What breaks when the component holding that decision dies, and whether the breakage is oversell (unacceptable — you sold stock you do not have) or undersell (recoverable).
+3. **Tests that prove the invariant, not tests that exercise the happy path.** A stress test reporting "12k req/s, 0 errors" proves nothing. One that asserts `orders === stock` exactly, under 20× oversubscription, proves everything.
 
 Everything below optimises for making those three legible.
 
@@ -18,173 +18,185 @@ Everything below optimises for making those three legible.
 
 | # | Requirement | Invariant to enforce | Where enforced |
 |---|---|---|---|
-| 1 | Configurable sale window | No grant outside `[startAt, endAt)` | Atomic script (single clock) |
-| 2 | Single product, limited stock | `count(orders) <= totalStock`, always | Atomic script + DB check |
-| 3 | One item per user | `count(orders where user) <= 1` | Atomic script + `UNIQUE (sale_id, user_id)` |
-| 4 | API: status / purchase / check | — | Fastify HTTP layer |
-| 5 | React frontend | — | Vite + React |
+| 1 | Configurable sale window | No claim outside `[startAt, endAt)` | API fast-reject + worker |
+| 2 | Single product, limited stock | `count(orders) <= totalStock`, always | Conditional claim statement (§4) |
+| 3 | One item per user | `count(orders where user) <= 1` | Worker buyer set + `UNIQUE (sale_id, user_id)` |
+| 4 | API: status / purchase / check | — | Fastify HTTP + WebSocket |
+| 5 | React frontend | — | Vite + React + Socket.IO client |
 | 6 | System diagram | — | Mermaid in README |
 
-Invariants 2 and 3 get **two independent enforcers**: the fast path (Redis) for throughput, and a durable database constraint as the backstop. If the fast path is ever wrong, the database refuses the write and we get an alert instead of an oversold product. That redundancy is deliberate and worth calling out in the README.
+Invariants 2 and 3 get **two independent enforcers**: the worker's in-memory state for speed, and database constraints as the durable backstop. If the worker is ever wrong, Postgres refuses the write and we get an alert instead of an oversold product.
 
 ### 2.2 Ambiguities, and the decisions I am taking
 
 The brief leaves these open. Each is a defensible judgement call; the README will state the choice and the reason.
 
 - **Is there authentication?** No. `userId` is a client-supplied string, exactly as the brief's frontend description implies ("enter a user identifier"). The one-per-user rule is therefore enforced *per identifier*, not per human. I will say so explicitly rather than pretend otherwise, and note that in production this key would come from a verified session.
-- **Is "already purchased" an error?** No — it is a success. Because each user may hold at most one item, `userId` is a natural idempotency key: a retried or duplicated `POST /purchase` returns the *same* order. This makes the endpoint safely retryable, which matters because the first thing a panicking user does is double-click. Returns `200` with `status: "already_purchased"` and the existing order id.
-- **Is stock exposed?** Exact remaining stock is a poll magnet and leaks sale mechanics. The status endpoint returns a coarse `availability: "plenty" | "low" | "sold_out"`, not a live counter. Cheap, and it removes the incentive to hammer the endpoint.
-- **Whose clock decides the window?** Redis's. See §4.
-- **Reservation or sale?** A grant is final, not a held reservation. There is no payment step in the brief, so introducing a TTL'd reservation that can expire adds a whole class of states ("expired, stock returned") the requirement never asks for. Out of scope, mentioned as an extension.
+- **Is the purchase synchronous?** No — and this is the central decision. `POST /api/purchase` returns `202 Accepted` once the attempt is durably queued; the outcome arrives over a WebSocket. The brief sanctions this directly by asking for a separate "check if you secured an item" endpoint, which doubles as the reconnect path. §3 explains why the asynchrony buys more than it costs.
+- **Is "already purchased" an error?** No — it is a success. Because each user may hold at most one item, `userId` is a natural idempotency key: a retried attempt resolves to the *same* order. This matters because the first thing a panicking user does is double-click.
+- **Is stock exposed?** Exact remaining stock is a poll magnet and leaks sale mechanics. The status endpoint returns a coarse `availability: "plenty" | "low" | "sold_out"`, not a live counter.
+- **Reservation or sale?** A claim is final, not a held reservation. There is no payment step in the brief, so a TTL'd reservation that can expire adds a class of states ("expired, stock returned") the requirement never asks for. Out of scope.
 
 ### 2.3 Non-functional targets
 
 Concrete numbers, so the stress test has something to pass or fail:
 
-- **Throughput:** ≥ 10k purchase attempts/sec sustained on a laptop-scale docker-compose, single Redis.
-- **Latency:** p99 < 50 ms for `POST /purchase` under full load.
+- **Throughput:** ≥ 10k purchase attempts/sec sustained on a laptop-scale docker-compose.
+- **Latency:** p99 < 100 ms from `POST` to the WebSocket result, measured end to end, for attempts that are not queued behind a burst.
 - **Correctness:** zero oversell and zero double-grant at any load. Non-negotiable; this one gets asserted, not merely measured.
-- **Availability:** API instances are stateless and disposable; killing one mid-test loses only its in-flight requests.
+- **Load shedding:** when the queue saturates, the system rejects cleanly rather than growing unboundedly.
 
 ## 3. Architecture
 
 ```mermaid
 flowchart TB
-    U[Browser - React] -->|GET /api/sale, POST /api/purchase| LB[Load balancer]
-    LB --> A1[API - Fastify - stateless]
-    LB --> A2[API - Fastify - stateless]
-    LB --> A3[API - Fastify - stateless]
+    U[Browser - React + Socket.IO] -->|POST /api/purchase| A1
+    U <-->|WebSocket| A1
 
-    A1 & A2 & A3 -->|EVALSHA grant.lua - one round trip| R[(Redis: stock counter, buyers set, orders stream)]
+    subgraph API [API tier - horizontally scalable]
+        A1[Fastify instance 1]
+        A2[Fastify instance 2]
+    end
 
-    R -->|XREADGROUP| W[Persistence worker]
-    W -->|idempotent INSERT| P[(Postgres: durable ledger)]
-    P -.->|cold-start rehydrate| R
+    A1 & A2 -->|publish attempt - publisher confirms| Q[[RabbitMQ: attempts queue, single-active-consumer, bounded length]]
+
+    Q --> W[Worker - serial, batched, in-memory stock and buyer set]
+    W -->|conditional claim, one transaction| P[(Postgres: sales + orders)]
+    P -.->|rebuild state on promotion| W
+
+    W -->|results, sellout, presence| F[[RabbitMQ fanout exchange]]
+    F -.-> A1
+    F -.-> A2
 ```
 
-**Request path, in full:** load balancer → stateless Fastify instance → *one* `EVALSHA` to Redis → response. That is a single network hop on the hot path. No database on the purchase path at all.
+**The queue is the concurrency control.** A single active consumer processes attempts in order, so there is no race to arbitrate — correctness comes from the topology, not from clever locking. The worker checks and claims in one database transaction, which means there is no separately-granted outcome waiting to be persisted, and therefore **no outbox and no two-system divergence**.
 
 **Component roles:**
 
-- **API (Fastify, TypeScript).** Validation, rate limiting, and one Redis call. Holds no sale state beyond a short-lived cache (§6). Scales horizontally to N replicas with zero coordination.
-- **Redis.** The authority for the grant decision. Single-threaded command execution is the property the whole design leans on: a Lua script is an atomic unit, so "is the sale open / has this user bought / is there stock / take one" is one indivisible step. No locks, no transactions, no retries, no race.
-- **Orders stream (Redis Stream).** The handoff to durability. Critically, the `XADD` happens *inside the same Lua script* as the decrement — so a grant and its persistence request are written atomically, in one system. There is no window where stock was taken but nothing was queued.
-- **Persistence worker.** A consumer-group reader draining the stream into Postgres with at-least-once delivery and an idempotent upsert. Can crash and resume; unacknowledged entries are redelivered.
-- **Postgres.** The durable ledger and the system of record for reporting and recovery. Never on the purchase hot path.
+- **API (Fastify + Socket.IO).** Rejects what it can for free (§6), publishes the rest to RabbitMQ with publisher confirms, and holds the user's WebSocket. Horizontally scalable; the only state it holds is its own socket map.
+- **RabbitMQ.** Carries purchase *attempts* (requests, not decisions) on a durable, length-bounded queue with `x-single-active-consumer`, and carries results, sellout and presence back on a fanout exchange.
+- **Worker.** The sole writer. Holds stock and the buyer set in memory, batches claims into transactions, and publishes each outcome to the fanout. Rebuilds its state from Postgres on startup or promotion.
+- **Postgres.** System of record and the durable enforcer of both invariants.
 
-**Why not the obvious alternatives** (the README will carry a condensed version of this):
+**Why the queue, and not a distributed cache making the decision:** the alternative I costed first was an atomic Redis Lua script granting stock synchronously, with a stream handing off to a persistence worker. It is faster (§13) but strictly worse on correctness: a grant lives in Redis before it reaches Postgres, so a crash in that window means a user was told "confirmed" and holds nothing. In the design below, a result is only ever published **after** the transaction commits — the system never tells a user something false. The spike that evaluated it is kept at [`prototype/redis-grant/`](./prototype/redis-grant/).
 
-| Approach | Why not |
+**Why not claim directly in the API request:** because contention on the stock row is measurably catastrophic. With 50 connections competing for the same row (§4), throughput rose 7% over a single connection while mean latency rose 46×. Serializing in the queue converts that convoy into an ordered stream, and lets the worker batch.
+
+| Rejected alternative | Why |
 |---|---|
-| `UPDATE stock SET n = n - 1 WHERE n > 0` in Postgres | Correct, but every buyer contends on one row. Under thousands of concurrent writers this becomes a lock convoy — throughput collapses and p99 goes to seconds. Fine at 100 rps, not at 10k. |
-| Application-level mutex / in-process counter | Breaks the moment there is more than one API instance, which is exactly the scalability the brief asks for. |
-| Optimistic concurrency with retries (CAS loop) | Under heavy contention almost every attempt retries; wasted work grows with load, which is backwards. |
-| Queue everything, decide in a single consumer | Correct and genuinely scalable, but the user cannot be told the outcome synchronously — it needs polling or websockets and a far more complex frontend. The Lua script gets the same serialization for a fraction of the complexity. Worth citing as the design for a sale 100× larger. |
+| `UPDATE ... WHERE remaining > 0` from N API instances | Lock convoy. Measured: 899 tps at 55.6 ms mean vs 835 tps at 1.2 ms single-connection. |
+| Application-level mutex / in-process counter | Breaks with more than one API instance, which is exactly the scalability the brief asks for. |
+| Optimistic concurrency with retries | Under heavy contention almost every attempt retries; wasted work grows with load, which is backwards. |
+| Redis Lua grant + stream to Postgres | Faster, but introduces a window where a confirmed user has no durable order. See `prototype/redis-grant/`. |
 
-## 4. The critical path: one atomic grant
+## 4. The critical path: one conditional claim
 
-This script is the core of the submission and is where review attention will land, so it gets written first and tested hardest.
+The worker's claim must write the order **only if** it actually took a unit. Doing this as a separate `UPDATE` then `INSERT` invites the bug where the update matches no rows and the insert happens anyway. One statement removes the possibility:
 
-```lua
--- KEYS[1] = sale:{id}:stock   (integer string)
--- KEYS[2] = sale:{id}:buyers  (set of userId)
--- KEYS[3] = sale:{id}:orders  (stream)
--- KEYS[4] = sale:{id}:window  (hash: startAtMs, endAtMs)
--- ARGV[1] = userId
--- ARGV[2] = orderId (uuid v4, generated by the caller)
-
-local t     = redis.call('TIME')
-local now   = (tonumber(t[1]) * 1000) + math.floor(tonumber(t[2]) / 1000)
-local w     = redis.call('HMGET', KEYS[4], 'startAtMs', 'endAtMs')
-local start = tonumber(w[1])
-local stop  = tonumber(w[2])
-
-if start == nil then return {'NOT_CONFIGURED', ''} end
-if now <  start then return {'NOT_STARTED', ''} end
-if now >= stop  then return {'ENDED', ''} end
-
--- Idempotency: a repeat attempt is a success, and must not consume stock.
-if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then
-  return {'ALREADY_PURCHASED', ''}
-end
-
-local remaining = tonumber(redis.call('GET', KEYS[1]) or '0')
-if remaining <= 0 then return {'SOLD_OUT', ''} end
-
-redis.call('DECR', KEYS[1])
-redis.call('SADD', KEYS[2], ARGV[1])
-redis.call('XADD', KEYS[3], '*',
-           'orderId', ARGV[2], 'userId', ARGV[1], 'atMs', tostring(now))
-
-return {'CONFIRMED', ARGV[2]}
+```sql
+WITH claimed AS (
+  UPDATE sales SET remaining = remaining - 1
+  WHERE id = $1 AND remaining > 0
+  RETURNING id
+)
+INSERT INTO orders (sale_id, user_id)
+SELECT $1, $2 FROM claimed
+ON CONFLICT (sale_id, user_id) DO NOTHING
+RETURNING id;
 ```
 
-Four details that matter, each of which I expect to be asked about:
+An empty result means "no unit taken", for either reason — sold out, or this user already holds one. The worker distinguishes the two from its in-memory buyer set, which is cheap and never authoritative.
 
-1. **All checks and all mutations are in one script.** Redis runs it to completion before any other command. There is no interleaving, so there is no need for a compensating rollback — the alternative shape (`SADD` first, then discover stock is gone, then `SREM`) is a bug factory, and is avoided entirely by reading before writing inside the atomic unit.
-2. **`TIME` comes from Redis, not the API process.** With N API instances the window boundary would otherwise be decided by N clocks with skew between them, and the sale would start and end at slightly different moments depending on which pod you hit. One clock, one boundary.
-3. **Non-deterministic commands are safe here.** `TIME` and `XADD *` would be unreplayable under verbatim script replication, but Redis ≥ 5 replicates script *effects*, so a replica receives the concrete values. Worth a comment in the source so it does not look accidental.
-4. **`orderId` is generated by the caller.** Keeps the script free of randomness and makes the id available to the response without a second round trip.
-
-**This script is already verified.** A throwaway spike in [`prototype/`](./prototype/) runs it against a real Redis 8 over 50 concurrent pipelined connections and asserts the invariants directly. All pass:
+**This is already verified.** A spike at [`prototype/postgres-claim/`](./prototype/postgres-claim/) runs it against a real Postgres 18 under `pgbench`. All numbers below are measured, not estimated:
 
 | Scenario | Result |
 |---|---|
-| Stock 1000, 20 000 distinct users | exactly 1000 `CONFIRMED`, 19 000 `SOLD_OUT`; stock 0, buyers 1000, stream 1000 |
-| Stock 1000, 1000 attempts from **one** user | exactly 1 `CONFIRMED`, 999 `ALREADY_PURCHASED`; stock decremented by exactly 1 |
-| Before start / after end | `NOT_STARTED` / `ENDED`, zero stock consumed |
-| Unconfigured sale | `NOT_CONFIGURED`, no partial writes |
-| Sold out mid-flight | losers are **not** added to the buyers set, so a restock does not lock them out |
+| 20 000 attempts (50 connections) against stock of 1000 | **exactly 1000 orders, 1000 distinct users, `remaining` = 0** — no oversell |
+| Serial worker, 1 claim per transaction | 835 claims/s, 1.2 ms mean |
+| Serial worker, 100 claims per transaction | **~23 650 claims/s**, 4.2 ms per batch |
+| 50 connections contending on the stock row | 899 claims/s, **55.6 ms mean** |
+| Post-sellout rejections | ~17k/s even when they reach Postgres |
 
-Throughput: **20 000 grants in 95 ms — ~210 000 ops/s** against a single unoptimised local Redis. That is a useful anchor for the rest of the design: the grant decision is roughly 20× cheaper than the 10k/s target in §2.3, which means the bottleneck will be HTTP handling and the network, not the serialization point. Scaling effort belongs on the API tier, not on Redis.
+Three conclusions drive the rest of the design:
 
-
+1. **Batching is not an optimisation, it is the design.** 835/s would miss the 10k/s target by an order of magnitude; batching 100 claims per transaction clears it 2.4×. The cost is fsync per commit, so amortising the commit is where all the throughput lives.
+2. **Contention is real and the queue is what avoids it.** 50× the concurrency bought 7% more throughput and 46× the latency. That is the lock convoy, measured, and it is the strongest argument for serializing upstream.
+3. **The rejection path is cheap even at its worst.** Post-sellout rejections sustained ~17k/s *while still hitting Postgres*. Since §6 rejects them in memory instead, the real ceiling is far higher — and the expensive path is bounded by `totalStock`, not by traffic.
 
 ## 5. Durability and failure modes
 
-This is the section the design stands or falls on, so the README will be blunt about it rather than claim guarantees the system does not have.
-
 | Failure | Behaviour | Severity |
 |---|---|---|
-| API instance dies | LB routes elsewhere. In-flight requests fail; the client retries and the request is idempotent on `userId`. | None |
-| Worker dies | Stream entries go unacknowledged and are redelivered to the next consumer. Grants are unaffected — the user already has a confirmed answer. | None |
-| Postgres down | Worker stalls and retries with backoff; the stream buffers. The sale keeps serving. Reads of `/purchase/:user` fall back to Redis. | Degraded, self-healing |
-| Redis loses its last second of writes (AOF `everysec`, hard crash) | Those grants vanish: the user was told "confirmed" but holds no order. Stock and the buyer entry vanish *together*, so they retry and can buy again. | **Undersell, never oversell** |
-| Redis lost entirely | Cold-start rehydrate from Postgres: `stock = totalStock - count(orders)`, `buyers = select user_id from orders`. | Undersell bounded by the unpersisted tail |
+| API instance dies | Sockets drop. Client reconnects to another instance and re-syncs via `GET /api/purchase/:userId`. An already-queued attempt still gets processed; the result is waiting. | None |
+| Worker dies mid-batch | Uncommitted transaction rolls back; messages were never acked, so RabbitMQ redelivers them to the newly promoted consumer. | None |
+| Worker dies after commit, before ack | Redelivery re-runs the claim; `ON CONFLICT DO NOTHING` makes it a no-op and the result is re-published. Idempotent. | None |
+| Postgres down | Worker stops acking; the queue backs up to its bound, then the API sheds load with `503`. No incorrect answers are given. | Degraded, self-healing |
+| RabbitMQ down | No attempts accepted; API returns `503`. This is the hard dependency of the design. | Outage, correct |
+| Result message lost | User's socket shows nothing; the reconnect/poll path resolves it from Postgres. | Cosmetic |
 
-The asymmetry is the point: **every failure path degrades towards undersell.** Stock and the buyer-set entry are written in the same atomic unit, so they can never diverge in the direction that lets two people hold the same unit — and the durable ledger's `UNIQUE (sale_id, user_id)` plus a stock check mean even a logic bug cannot persist an oversell.
+**The property worth stating plainly: a user is never told "confirmed" unless the row is committed.** Results are published after the transaction, so there is no window in which the system's answer and its durable state disagree. That is the main thing this design buys over the Redis alternative, and it is why RabbitMQ being a hard dependency is an acceptable trade — an outage is honest, whereas a false confirmation is not.
 
-Configuration: `appendonly yes`, `appendfsync everysec`. `always` would make the crash window zero at a large throughput cost; for a flash sale, a ≤1s window that can only cause undersell is the right trade, and I will say so explicitly. Closing it entirely needs either a synchronous replica (`WAIT 1 0`) or a synchronous DB write — both on the table, both costly, both documented as the knob to turn if the business disagrees.
+Required for the above to hold:
+- **Publisher confirms** on the API side. Without them a "published" attempt can vanish and the user waits forever for a result that will never come.
+- **Durable queue, persistent messages**, and quorum queues if surviving a broker node loss matters.
+- **Bounded queue** via `x-max-length` with `overflow: reject-publish`, so saturation becomes a clean `503` rather than unbounded memory growth and unbounded latency.
 
-## 6. API surface
+## 6. Early rejection: what never reaches the queue
+
+Most flash-sale traffic is doomed, and the cheapest request is the one that never gets published. Three filters at the API layer, in increasing cost:
+
+1. **Window check — free.** `startAt`/`endAt` are static config, so the entire pre-sale rush and everything after the end is rejected in process with zero I/O.
+2. **Sellout flag — one message, then free.** When the worker takes the last unit it publishes `SOLD_OUT` once to the fanout; every API instance sets a local boolean and rejects in memory from then on. This is safe because **sellout is monotonic**: it only ever flips one way, and only the sole writer can flip it. A stale flag can only ever be wrong in the harmless direction (enqueueing a doomed attempt that the worker rejects), never in the direction that wrongly rejects a buyer.
+3. **Periodic refresh — one row per instance per second.** Each instance re-reads `sales.remaining` on a timer, covering instances that booted late or missed the fanout message. This is why `remaining` is a denormalized column rather than a `count(*)`: it keeps the refresh a single primary-key read.
+
+Deliberately **not** filtered at the API layer: "already purchased". It needs a per-user lookup, the frontend already disables the button while a request is in flight, and the worker rejects duplicates from its in-memory buyer set for almost nothing. Paying a database round trip per request to catch a rare case would be a bad trade.
+
+Rate limiting still applies on top: a per-IP and per-user token bucket, rejecting with `429`. Not in the brief, but an endpoint this attractive without a limiter is a conspicuous omission.
+
+## 7. API surface
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/api/sale` | `{ status: upcoming\|active\|ended, availability: plenty\|low\|sold_out, startAt, endAt, serverTime }` |
-| `POST` | `/api/purchase` | `200 { status: confirmed\|already_purchased, orderId }` · `409 { status: sold_out\|not_started\|ended }` · `429` |
-| `GET` | `/api/purchase/:userId` | `{ status: none\|confirmed, orderId?, purchasedAt? }` |
+| `GET` | `/api/sale` | `{ status, availability, startAt, endAt, serverTime, viewers }` |
+| `POST` | `/api/purchase` | `202 { status: "queued", attemptId }` · `409 { status: sold_out\|not_started\|ended }` · `429` · `503` |
+| `GET` | `/api/purchase/:userId` | `{ status: none\|confirmed, orderId?, purchasedAt? }` — reconnect source of truth |
 | `GET` | `/healthz` `/readyz` `/metrics` | liveness, readiness, Prometheus |
 
-Two throughput decisions live here:
+WebSocket events pushed to the client:
 
-- **`GET /api/sale` must not touch Redis per request.** It is by far the highest-volume endpoint — every open tab polls it. Each API instance caches the sale state in-process and refreshes it on a ~250 ms timer. Status is not a correctness-critical read; being 250 ms stale is harmless, and this keeps the poll storm entirely off Redis. `serverTime` is returned so the frontend can run a countdown without trusting the client clock.
-- **Sold-out short-circuit.** In a real flash sale most traffic arrives *after* the stock is gone. Once an instance observes a confirmed sellout it rejects locally without calling Redis. This is a cache, so it may only short-circuit a *rejection*, never grant without the script. The refresh timer resets it, so a restock recovers automatically.
+| Event | Payload |
+|---|---|
+| `purchase:result` | `{ attemptId, status: confirmed\|already_purchased\|sold_out, orderId? }` |
+| `sale:status` | `{ status, availability }` — broadcast on change |
+| `sale:viewers` | `{ count }` — aggregated presence, every few seconds |
 
-Rate limiting: per-IP and per-userId token bucket in Redis, rejecting early with `429`. Abuse is not in the brief, but an endpoint this attractive without a limiter is an obvious omission.
+`GET /api/sale` is cached in process and refreshed on the same 1 s timer as the sellout check, so the highest-volume endpoint costs no I/O per request. `serverTime` is returned so the frontend countdown does not trust the client clock.
 
-## 7. Data model
+## 8. WebSocket transport and cross-instance delivery
+
+**Library: Socket.IO**, for reconnection, heartbeats and acknowledgements — all of which matter here because a socket dropping mid-purchase is routine, and hand-rolling reconnect on raw `ws` is a meaningful chunk of work for no credit.
+
+**But not its Redis adapter.** The usual way to broadcast across instances is `@socket.io/redis-adapter`, which would reintroduce Redis purely as a message bus — undoing the simplification this design just bought. RabbitMQ is already present and does the same job:
+
+- **Results target exactly one user.** Each API instance consumes the fanout, looks up its own local `Map<userId, socket>`, and delivers or discards. No cross-instance room broadcast is needed at all.
+- **Presence and status are broadcasts**, so each instance simply emits locally to its own connections on receiving the fanout message.
+
+**Presence is aggregated, never exact.** Exact per-connection accounting broadcast to everyone is O(N²). Instead each instance publishes its own connection count to the fanout every few seconds; every instance keeps a `{instanceId: count, seenAt}` map, expires stale entries, and sums locally. O(N), no central aggregator, and the number is decorative so approximation is free. This is the "X other people are looking at this" feature — not required by the brief, but it is what a real flash sale shows, and the WebSocket is already there.
+
+## 9. Data model
 
 ```sql
 CREATE TABLE sales (
   id          TEXT PRIMARY KEY,
   total_stock INTEGER NOT NULL CHECK (total_stock >= 0),
+  remaining   INTEGER NOT NULL CHECK (remaining >= 0),   -- denormalized; keeps §6 a PK read
   start_at    TIMESTAMPTZ NOT NULL,
   end_at      TIMESTAMPTZ NOT NULL,
   CHECK (end_at > start_at)
 );
 
 CREATE TABLE orders (
-  id         UUID PRIMARY KEY,
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   sale_id    TEXT NOT NULL REFERENCES sales(id),
   user_id    TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -193,86 +205,95 @@ CREATE TABLE orders (
 CREATE INDEX ON orders (sale_id);
 ```
 
-The sale window and stock live in `sales` (satisfying "configurable"), are loaded into Redis at boot, and `orders` is the ledger the worker appends to. The worker's insert is `ON CONFLICT (sale_id, user_id) DO NOTHING`, which makes at-least-once stream redelivery harmless.
+`CHECK (remaining >= 0)` is the durable anti-oversell backstop: even a logic bug cannot drive stock negative, because Postgres will abort the transaction. Combined with the `UNIQUE` constraint, both headline invariants are enforced by the database independently of any application code.
 
-Oversell cannot be persisted even in principle: a count check against `total_stock` runs in the worker, and a violation is logged loudly and alerted rather than silently dropped — a trip of that path means the fast path has a bug, and I would rather find out.
+The worker rebuilds its in-memory state on startup or promotion with two queries — `SELECT remaining FROM sales` and `SELECT user_id FROM orders WHERE sale_id = $1`. Both are bounded by `totalStock`, so promotion is fast.
 
-## 8. Frontend
+## 10. Frontend
 
 Deliberately small — the brief asks for a demonstration, not a storefront. Vite + React + TypeScript, one page:
 
-- Sale status with a countdown driven off `serverTime`, not the browser clock.
+- Sale status and countdown driven off `serverTime`.
 - A `userId` input, persisted to `localStorage` so a refresh does not lose your identity.
-- A "Buy Now" button, disabled outside the active window, with an in-flight state that blocks the double-click rather than relying on the server's idempotency to absorb it.
-- Clear terminal states: *confirmed* (with order id), *already purchased*, *sold out*, *not started*, *ended*.
-- On mount it calls `/api/purchase/:userId`, so returning users see their existing order immediately.
+- A "Buy Now" button, disabled outside the active window and while a request is in flight.
+- An explicit **queued** state between `202` and the WebSocket result — this is the honest representation of what the system is doing, and it is where a real flash sale shows a spinner.
+- Terminal states: *confirmed* (with order id), *already purchased*, *sold out*, *not started*, *ended*, *try again* (on `503`).
+- Live viewer count from `sale:viewers`.
+- On mount and on every reconnect, it calls `GET /api/purchase/:userId`, so a dropped socket never loses a result.
 
-Polling `/api/sale` every 2 s. SSE would be nicer and avoids the poll storm, but polling against an in-process-cached endpoint is cheap, and the complexity budget is better spent on the concurrency core. Noted as an extension.
+## 11. Testing strategy
 
-## 9. Testing strategy
+**Unit (Vitest).** Window/status derivation, the monotonic sellout flag state machine, presence aggregation and stale-instance expiry, result-to-UI-state mapping. Fast, no I/O.
 
-Three layers, with the middle one carrying most of the weight.
+**Integration (Vitest against real RabbitMQ and Postgres via docker-compose).** The claim statement, worker batching, consumer failover, and — importantly — **redelivery idempotency**: ack a message only after commit, kill the worker between the two, and assert the redelivered message produces no second order.
 
-**Unit (Vitest).** Pure domain logic: status derivation from a window, response mapping, the sold-out cache state machine. Fast, no I/O.
+**The two decisive tests**, run through the full stack rather than against the database alone:
 
-**Integration (Vitest + real Redis and Postgres via docker-compose).** The Lua script against a live Redis, and the API via Fastify's `inject`. Mocking Redis here would test the mock, not the script — and the script *is* the concurrency control, so it gets exercised against the real engine. Covers each terminal state, window boundaries, and worker → Postgres persistence including redelivery.
+1. *No oversell.* Stock = 1000, 20 000 attempts from 20 000 distinct users. Assert exactly 1000 `confirmed`, 19 000 rejected, and exactly 1000 rows in `orders` once the queue drains.
+2. *No double-grant.* 1000 concurrent attempts from **one** user. Assert exactly one order and `remaining` decremented by exactly one.
 
-**The two decisive tests.** These assert the invariants directly and run in CI, not just by hand. The [`prototype/`](./prototype/) spike already implements both against a raw socket client; they get ported to Vitest and re-pointed at the HTTP API so they exercise the whole stack rather than Redis alone:
+Both already hold at the SQL layer — `prototype/postgres-claim/` demonstrates 20 000 attempts producing exactly 1000 orders — so the integration versions are testing the queue and worker wiring, not the claim itself.
 
-1. *No oversell.* Stock = 1000. Fire 20 000 concurrent purchases from 20 000 distinct users. Assert exactly 1000 `confirmed`, exactly 19 000 `sold_out`, zero 5xx — and, after the worker drains, exactly 1000 rows in `orders`.
-2. *No double-grant.* Stock = 1000. Fire 1000 concurrent purchases from **one** user. Assert exactly one order, and stock decremented by exactly one.
+**Stress (k6).** Ramp to high concurrency over ~60 s with thresholds encoded as pass/fail, driving HTTP for attempts and holding WebSocket connections for results, so the measured latency is genuinely end-to-end rather than time-to-`202`. A teardown asserts the same invariants at realistic load. Results and their interpretation go into the README.
 
-**Stress (k6).** The headline run: ramp to high concurrency over ~60 s against docker-compose, with thresholds encoded as pass/fail (`http_req_failed < 1%`, `p(99) < 50ms`), and a teardown that queries the API and the database to assert the same invariants at realistic load. k6 over autocannon because scenarios and thresholds make the run self-judging rather than a wall of numbers to interpret in prose. A small autocannon script stays in the repo as a zero-extra-tooling fallback.
+**Load shedding is a test case, not an afterthought.** Drive past the queue bound and assert the API returns `503` cleanly, memory stays flat, and no attempt is silently dropped.
 
-Results — throughput, latency distribution, and the invariant assertions — get written into the README with an explanation of what the numbers mean and where the next bottleneck would appear.
-
-## 10. Repo layout and tooling
+## 12. Repo layout and tooling
 
 ```
 apps/
-  api/        Fastify server, routes, rate limiting, grant client
-  worker/     stream consumer -> Postgres
+  api/        Fastify + Socket.IO, early rejection, publisher confirms
+  worker/     single-active consumer, batched claims, result publishing
   web/        Vite + React frontend
 packages/
-  core/       grant.lua, domain types, status logic, shared config schema
+  core/       domain types, status logic, config schema, shared message contracts
 tests/
   integration/
-  stress/     k6 scenarios + autocannon fallback
+  stress/     k6 scenarios
 docs/
-  REQUIREMENT.md  PLAN.md
+  REQUIREMENT.md  PLAN.md  prototype/
 docker-compose.yml   README.md
 ```
 
-pnpm workspaces. Fastify over Express for throughput and schema-based validation — serialization overhead actually shows up at these rates. `ioredis`; `pg` with plain SQL rather than an ORM, since the queries are trivial and an ORM would obscure the `ON CONFLICT`; `zod` for config; `pino` for logging; `prom-client` for metrics. One `docker compose up` brings up Redis, Postgres, API, worker, and frontend so the reviewer's first command works.
+pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend.
 
-## 11. Implementation phases
+Two infrastructure components, not three — dropping Redis is a direct consequence of the queue owning the decision, and it is worth calling out in the README as a simplification rather than leaving it unremarked.
 
-Ordered so the risky, interesting part is done and proven first. Estimates are for a focused build.
+## 13. Implementation phases
+
+Ordered so the risky part is proven first. Estimates are for a focused build.
 
 | # | Phase | Output | Est. |
 |---|---|---|---|
 | 0 | Scaffold | pnpm workspaces, TS config, lint, docker-compose, CI | 1–2 h |
-| 1 | **Grant core** | `grant.lua` + integration tests against real Redis, incl. both invariant tests — *script already drafted and verified, see §4* | 1–2 h |
-| 2 | API | Fastify routes, validation, status cache, rate limiting, API tests | 2–3 h |
-| 3 | Durability | Worker, Postgres schema + migrations, idempotent upsert, cold-start rehydrate | 2–3 h |
-| 4 | Frontend | React page, polling, terminal states | 2–3 h |
-| 5 | Stress | k6 scenarios, run, capture and interpret results | 2–3 h |
-| 6 | Write-up | README, Mermaid diagram, trade-offs, run instructions, stress summary | 2 h |
+| 1 | **Claim core** | Schema, migrations, claim statement, worker batching + both invariant tests — *statement already drafted and verified, §4* | 2 h |
+| 2 | Queue wiring | amqplib, publisher confirms, single-active-consumer, bounded queue, redelivery idempotency tests | 2–3 h |
+| 3 | API | Fastify routes, three-tier early rejection, rate limiting, status cache | 2–3 h |
+| 4 | WebSocket | Socket.IO, fanout consumption, local socket map, presence aggregation | 2–3 h |
+| 5 | Frontend | React page, queued state, terminal states, viewer count | 2–3 h |
+| 6 | Stress | k6 scenarios incl. WebSocket result latency and load shedding | 2–3 h |
+| 7 | Write-up | README, Mermaid diagram, trade-offs, run instructions, stress summary | 2 h |
 
-Phase 1 is the submission. If time runs short, phases 4–6 get trimmed before phase 1 or 3 gives up any ground — a polished frontend over a shaky core would be the wrong trade for what this exercise grades.
+If time runs short, phases 5–6 get trimmed before 1–2 give up any ground. The presence feature (§8) is the first thing to cut — it is the one piece not traceable to a requirement.
 
-## 12. Explicitly out of scope
+## 14. Explicitly out of scope
 
-Named in the README so their absence reads as a decision rather than an oversight: authentication and identity verification, payment and order fulfilment, TTL'd reservations with expiry, multiple products or variants, waiting-room / virtual queue admission, bot detection beyond rate limiting, multi-region deployment, and live cloud deployment (the brief waives it).
+Named in the README so their absence reads as a decision rather than an oversight: authentication and identity verification, payment and fulfilment, TTL'd reservations with expiry, multiple products or variants, waiting-room admission control, bot detection beyond rate limiting, multi-region deployment, and live cloud deployment (the brief waives it).
 
-## 13. Extension: what the next 10× would need
+## 15. Extension: what the next 10× would need
 
-Useful to have an answer ready. The single Redis instance is the serialization point, and the spike puts its ceiling at ~210k grants/s locally — call it 100–200k in a realistic deployment once the network is real. Beyond that, shard the counter into K keys (`sale:{id}:stock:{0..K-1}`), have each request pick a shard at random, and implement stock stealing when a shard empties so the tail of the sale does not strand inventory. The buyers set shards by hash of `userId`, which is clean since membership is per-user. Not built — the exercise does not need it — but it is the honest answer to "and if this were 10× bigger?", and the current design does not have to be thrown away to get there.
+The single active consumer is the ceiling, and §4 puts it at ~23 650 claims/s batched. Two routes past it, in order of preference:
 
-## 14. Open questions
+1. **Shard the stock.** Partition `sales` into K bucket rows with one active consumer per partition, routed by a hash of `userId`. Add stock stealing when a bucket empties, so the tail of the sale does not strand inventory in a quiet shard. The claim statement is unchanged; only the routing key and the rebalance logic are new.
+2. **Admission filter in front of the queue.** Put the Redis Lua grant from [`prototype/redis-grant/`](./prototype/redis-grant/) — measured at ~210 000 ops/s — ahead of RabbitMQ purely to reject losers in sub-millisecond time, letting only winners through to the authoritative transaction. This reintroduces Redis, so it is worth doing only if the stress numbers demand it. The transactional core does not change.
+
+Neither is built. Both are reachable without discarding the current design, which is the point.
+
+## 16. Open questions
 
 Nothing here blocks a start; each has a stated default I will proceed under.
 
-1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with an in-memory fallback adapter for the grant store so the test suite can run with no containers.*
-2. **How long is the exercise meant to take?** The phasing above is ~15 hours. *Default: build phases 0–3 and 6 to a high standard, then 4–5 as time allows.*
+1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with in-memory adapters for the queue and store so unit tests run with no containers.*
+2. **How long is the exercise meant to take?** The phasing above is ~17 hours. *Default: build phases 0–4 and 7 to a high standard, then 5–6 as time allows.*
 3. **Should the stress test run in CI?** It needs sustained load and will be slow and noisy on shared runners. *Default: the two invariant tests run in CI; the full k6 run is manual, with its results committed.*
+4. **How large is the batch window?** 100 claims per transaction is measured, but the right value trades latency against throughput and depends on burst shape. *Default: batch by size **or** a few milliseconds of wall time, whichever comes first, and tune against the stress results.*
