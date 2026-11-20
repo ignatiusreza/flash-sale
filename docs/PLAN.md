@@ -32,10 +32,10 @@ Invariants 2 and 3 get **two independent enforcers**: the worker's in-memory sta
 The brief leaves these open. Each is a defensible judgement call; the README will state the choice and the reason.
 
 - **Is there authentication?** No. `userId` is a client-supplied string, exactly as the brief's frontend description implies ("enter a user identifier"). The one-per-user rule is therefore enforced *per identifier*, not per human. I will say so explicitly rather than pretend otherwise, and note that in production this key would come from a verified session.
-- **Is the purchase synchronous?** No — and this is the central decision. `POST /api/purchase` returns `202 Accepted` once the attempt is durably queued; the outcome arrives over a WebSocket. The brief sanctions this directly by asking for a separate "check if you secured an item" endpoint, which doubles as the reconnect path. §3 explains why the asynchrony buys more than it costs.
+- **Is the purchase synchronous?** No — and this is the central decision. `POST /api/purchase` returns `202 Accepted` once the attempt is durably queued; the outcome arrives over a WebSocket. The brief sanctions this directly by asking for a separate "check if you secured an item" endpoint, which doubles as the reconnect path. §3 explains why the asynchrony buys more than it costs — and §15.2 is the stronger reason: the moment a payment step exists, a synchronous response is impossible anyway, because no HTTP request should be held open across a PSP round trip. Choosing async now is what keeps that door open.
 - **Is "already purchased" an error?** No — it is a success. Because each user may hold at most one item, `userId` is a natural idempotency key: a retried attempt resolves to the *same* order. This matters because the first thing a panicking user does is double-click.
 - **Is stock exposed?** Exact remaining stock is a poll magnet and leaks sale mechanics. The status endpoint returns a coarse `availability: "plenty" | "low" | "sold_out"`, not a live counter.
-- **Reservation or sale?** A claim is final, not a held reservation. There is no payment step in the brief, so a TTL'd reservation that can expire adds a class of states ("expired, stock returned") the requirement never asks for. Out of scope.
+- **Reservation or sale?** A claim is final, not a held reservation. There is no payment step in the brief, so a TTL'd reservation that can expire adds a class of states ("expired, stock returned") the requirement never asks for. Out of scope — but it is the first thing that changes if payment arrives, and §15.2 works through what it would cost.
 
 ### 2.3 Non-functional targets
 
@@ -383,7 +383,9 @@ If time runs short, phases 5–6 get trimmed before 1–2 give up any ground. Th
 
 Named in the README so their absence reads as a decision rather than an oversight: authentication and identity verification, payment and fulfilment, TTL'd reservations with expiry, multiple products or variants, waiting-room admission control, bot detection beyond rate limiting, multi-region deployment, and live cloud deployment (the brief waives it).
 
-## 15. Extension: what the next 10× would need
+## 15. Extensions
+
+### 15.1 What the next 10× would need
 
 The single active consumer is the ceiling, and §4.3 puts it at ~37 000–41 500 claims/s batched. Two routes past it, in order of preference:
 
@@ -391,6 +393,44 @@ The single active consumer is the ceiling, and §4.3 puts it at ~37 000–41 500
 2. **Admission filter in front of the queue.** Put the Redis Lua grant from [`prototype/redis-grant/`](./prototype/redis-grant/) — measured at ~210 000 ops/s — ahead of RabbitMQ purely to reject losers in sub-millisecond time, letting only winners through to the authoritative transaction. This reintroduces Redis, so it is worth doing only if the stress numbers demand it. The transactional core does not change.
 
 Neither is built. Both are reachable without discarding the current design, which is the point.
+
+### 15.2 Adding payment
+
+Payment is out of scope (§14) and the brief does not ask for it, but it is the most likely follow-up question, and the answer is not "add a step to the worker" — it inverts the scaling argument this plan is built on.
+
+**The two stages have opposite characteristics:**
+
+| Stage | Work | Latency | Bottleneck | Scales by |
+|---|---|---|---|---|
+| Claim | local write | ~1 ms | fsync per commit | **batching** |
+| Payment | external call to a PSP | 200 ms – 2 s | the PSP round trip | **in-flight concurrency** |
+
+Batching does nothing for payment. You cannot put a hundred authorizations in one transaction, each can decline independently, and the latency is somebody else's. Little's Law supplies the only knob: `in-flight = throughput × latency`, so 200 payments/s at 500 ms needs 100 concurrent. Conversely, parallelism did comparatively little for the claim — [`prototype/postgres-pool/`](./prototype/postgres-pool/) measured unbatched parallel claiming at 5 514/s against 37 000+/s for one batching worker.
+
+**So they must be separate stages with separate queues and opposite consumer topologies.** The attempts queue keeps `x-single-active-consumer` and batching; the payments queue gets **many competing consumers with high prefetch**, no ordering, retries and a dead-letter queue. Worth noting for implementation: in Node that concurrency comes from prefetch plus async I/O, not from process count — one worker with `prefetch: 100` holds 100 payments in flight. Process count is for fault isolation, not throughput.
+
+This is also where RabbitMQ stops being merely adequate and starts earning its keep. Retry with exponential backoff, dead-lettering after N attempts, per-message TTL and idempotency keys are exactly what payment needs, and exactly the features named in §3 as its advantage over a Redis Stream.
+
+**The reservation state machine becomes unavoidable.** §2.2 ruled out TTL'd reservations precisely because there was no payment step. Payment brings them back:
+
+```
+free ──► reserved ──► paying ──► paid
+            │            │
+            ▼            ▼
+         expired      failed
+            │            │
+            └──► free ◄──┘
+```
+
+with a reaper releasing `reserved` rows past `reserved_until`.
+
+**The trap worth naming before anyone asks:** a reservation expiring while its authorization is still in flight. The reaper frees the unit, someone else claims it, and the original authorization then succeeds — one unit, two paying customers. That needs all of: `reserved_until` comfortably exceeding the PSP timeout; never releasing from `paying`, only from `reserved` or after a *definitive* terminal response; the order id as an idempotency key on every PSP call so retries cannot double-charge; and reconciliation for anything stuck in `paying`. This is harder than the inventory problem the brief actually poses, and saying so is better than pretending the state machine is the whole of it.
+
+**Capacity, concretely.** 1000 units with a PSP at 500 ms and 100 in flight clears every payment in about five seconds. The claim stage still has to absorb 100k attempts in the first second — but §6's in-memory sellout flag rejects almost all of them without touching the database, so the two stages never compete.
+
+**This also resolves open question 5.** Once payment exists, the claim stage stops being the bottleneck — nothing can go faster than the PSP — so the counter design's batching advantage (37–41k/s versus the pool's unbatched 5.5k/s) stops buying anything. Meanwhile the pool model gives every unit a row with a lifecycle, which is exactly what reservation state needs, with no counter to keep in sync against row status. `FOR UPDATE SKIP LOCKED` then serves both stages: claiming inventory, and claiming payment jobs. The pool's two recorded costs also shrink — duplicate claims abort one transaction rather than a batch of 100 once the claim is no longer batched.
+
+**Recommendation: adopt the pool model if payment is ever in scope, and stay with the counter if it is not.** The deciding question is not throughput; it is whether a unit needs a lifecycle.
 
 ## 16. Open questions
 
@@ -400,4 +440,6 @@ Nothing here blocks a start; each has a stated default I will proceed under.
 2. **How long is the exercise meant to take?** The phasing above is ~17 hours. *Default: build phases 0–4 and 7 to a high standard, then 5–6 as time allows.*
 3. **Should the stress test run in CI?** It needs sustained load and will be slow and noisy on shared runners. *Default: the two invariant tests run in CI; the full k6 run is manual, with its results committed.*
 4. **How large is the batch window?** 100 claims per transaction and a 5 ms flush are what §4.2 assumes and §4.3 measures, but the pair trades latency against throughput and the right values depend on burst shape. *Default: ship those, instrument batch-size distribution and flush-reason, and tune against the stress results rather than guessing up front.*
-5. **Counter row, or a pool of claimable rows?** [`prototype/postgres-pool/`](./prototype/postgres-pool/) measures pre-warming stock as `user_id IS NULL` order rows claimed with `FOR UPDATE SKIP LOCKED`. It reaches 61k claims/s batched across 10 workers — ~1.5× this plan's design — and, because it removes the contended counter row, it also removes the main reason the queue exists. That reopens a much simpler architecture: API instances claiming directly, synchronously, with no RabbitMQ, no worker and no WebSocket, at a measured 5.5k/s. *Default: stay with the plan as written, because it preserves arrival-order fairness and degrades more gracefully on duplicate claims. But this is the one open question that could still change the shape of the whole system, and it should be settled before phase 0 rather than after.*
+5. **Counter row, or a pool of claimable rows?** [`prototype/postgres-pool/`](./prototype/postgres-pool/) measures pre-warming stock as `user_id IS NULL` order rows claimed with `FOR UPDATE SKIP LOCKED`. It reaches 61k claims/s batched across 10 workers — ~1.5× this plan's design — and, because it removes the contended counter row, it also removes the main reason the queue exists. *Resolved by §15.2: the deciding question is not throughput but whether a unit needs a lifecycle. For the brief as written there is no payment step, so the counter stays. If payment is ever in scope, switch to the pool — reservations need per-unit state, and the batching advantage that favours the counter stops mattering once the PSP is the bottleneck.*
+
+   The synchronous variant that the pool also unlocks — API instances claiming directly at a measured 5.5k/s with no RabbitMQ, worker or WebSocket — stays rejected. It is dramatically simpler, but it forecloses the payment extension entirely, because a synchronous request cannot wait on a PSP.
