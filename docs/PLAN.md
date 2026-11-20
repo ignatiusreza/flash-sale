@@ -74,7 +74,7 @@ flowchart TB
 **Component roles:**
 
 - **API (Fastify + Socket.IO).** Rejects what it can for free (§6), publishes the rest to RabbitMQ with publisher confirms, and holds the user's WebSocket. Horizontally scalable; the only state it holds is its own socket map.
-- **RabbitMQ.** Carries purchase *attempts* (requests, not decisions) on a durable, length-bounded queue with `x-single-active-consumer`, and carries results, sellout and presence back on a fanout exchange.
+- **RabbitMQ.** Carries purchase *attempts* (requests, not decisions) on a durable, length-bounded **quorum** queue with `x-single-active-consumer`, replicated across a three-node cluster (§5.1), and carries results, sellout and presence back on a fanout exchange.
 - **Worker.** The sole writer. Holds stock and the buyer set in memory, batches claims into transactions, and publishes each outcome to the fanout. Rebuilds its state from Postgres on startup or promotion.
 - **Postgres.** System of record and the durable enforcer of both invariants.
 
@@ -234,15 +234,35 @@ Four conclusions drive the rest of the design:
 | Worker dies mid-batch | Uncommitted transaction rolls back; messages were never acked, so RabbitMQ redelivers them to the newly promoted consumer. | None |
 | Worker dies after commit, before ack | Redelivery re-runs the claim; `ON CONFLICT DO NOTHING` makes it a no-op and the result is re-published. Idempotent. | None |
 | Postgres down | Worker stops acking; the queue backs up to its bound, then the API sheds load with `503`. No incorrect answers are given. | Degraded, self-healing |
-| RabbitMQ down | No attempts accepted; API returns `503`. This is the hard dependency of the design. | Outage, correct |
+| One broker node dies | Quorum queue elects a new leader from the surviving replicas; publishes fail for the few seconds that takes, then resume. Committed messages survive, because a confirm means a majority already has them. | Brief, self-healing |
+| Broker cluster loses its majority | Queues become unavailable — quorum queues choose consistency over availability. No attempts accepted; API returns `503`. | Outage, correct |
 | Result message lost | User's socket shows nothing; the reconnect/poll path resolves it from Postgres. | Cosmetic |
 
-**The property worth stating plainly: a user is never told "confirmed" unless the row is committed.** Results are published after the transaction, so there is no window in which the system's answer and its durable state disagree. That is the main thing this design buys over the Redis alternative, and it is why RabbitMQ being a hard dependency is an acceptable trade — an outage is honest, whereas a false confirmation is not.
+**The property worth stating plainly: a user is never told "confirmed" unless the row is committed.** Results are published after the transaction, so there is no window in which the system's answer and its durable state disagree. That is the main thing this design buys over the Redis alternative, and it is why depending on RabbitMQ is an acceptable trade — an outage is honest, whereas a false confirmation is not.
 
 Required for the above to hold:
 - **Publisher confirms** on the API side. Without them a "published" attempt can vanish and the user waits forever for a result that will never come.
-- **Durable queue, persistent messages**, and quorum queues if surviving a broker node loss matters.
+- **Persistent messages** on a durable queue.
 - **Bounded queue** via `x-max-length` with `overflow: reject-publish`, so saturation becomes a clean `503` rather than unbounded memory growth and unbounded latency.
+
+### 5.1 Broker topology
+
+A single broker makes RabbitMQ a single point of failure for the whole sale, which is the weakest part of the design as otherwise specified. **The attempts queue is a quorum queue on an odd-sized cluster — three nodes, spread across availability zones.** Quorum queues are Raft-replicated with majority consensus, so a three-node cluster tolerates losing one node and a five-node cluster tolerates two. They also replace classic mirrored queues, which are gone from current RabbitMQ, so this is the supported path rather than an upgrade.
+
+Two things this changes beyond uptime:
+
+- **Publisher confirms get stronger.** On a single node a confirm means "on one broker's disk". On a quorum queue it means "on a majority of replicas", so the confirm the API waits for before returning `202` now genuinely survives a node loss. The two mechanisms reinforce each other; neither is sufficient alone.
+- **`x-single-active-consumer` still applies**, so the serialization the whole design rests on is unaffected by replication.
+
+Not every queue should be quorum. The per-instance queues bound to the results fanout (§8) are exclusive and auto-delete — they are meant to die with their API instance, and losing one costs nothing because the client re-syncs via `GET /api/purchase/:userId`. Replicating them would pay a consensus cost for data with no value past the second it was produced.
+
+**What this does not fix**, and the README should say so rather than imply a cluster is a cure:
+
+- **Failover is not instantaneous.** Leader election takes seconds, during which publishes fail. The API still needs the `503` path; a cluster shortens the outage, it does not remove the need to handle one.
+- **A network partition still fails the minority side.** Quorum queues are CP: nodes in the minority cannot serve the queue. That is the correct choice here — availability bought by accepting writes into a partition that may be rolled back is exactly the false-confirmation failure this design exists to avoid.
+- **Consensus costs throughput.** Every publish is replicated and acknowledged by a majority, so a quorum queue is slower per message than a single-node classic queue. The bounded queue above matters more, not less, once this cost is real.
+
+For the exercise itself, `docker-compose.yml` runs a single broker so the reviewer's first command stays fast, with a cluster overlay if time allows. The production topology is a documented decision, not an undemonstrated claim — which is the distinction §12 draws for everything else that is simplified for local running.
 
 ## 6. Early rejection: what never reaches the queue
 
@@ -372,7 +392,7 @@ Ordered so the risky part is proven first. Estimates are for a focused build.
 |---|---|---|---|
 | 0 | Scaffold | pnpm workspaces, TS config, lint, docker-compose, CI | 1–2 h |
 | 1 | **Claim core** | Schema, migrations, claim statement, worker batching + both invariant tests — *statement already drafted and verified, §4* | 2 h |
-| 2 | Queue wiring | amqplib, publisher confirms, single-active-consumer, bounded queue, redelivery idempotency tests | 2–3 h |
+| 2 | Queue wiring | amqplib, publisher confirms, quorum queue declaration, single-active-consumer, bounded queue, redelivery idempotency tests | 2–3 h |
 | 3 | API | Fastify routes, three-tier early rejection, rate limiting, status cache | 2–3 h |
 | 4 | WebSocket | Socket.IO, fanout consumption, local socket map, presence aggregation | 2–3 h |
 | 5 | Frontend | React page, queued state, terminal states, viewer count | 2–3 h |
@@ -409,7 +429,7 @@ Payment is out of scope (§14) and the brief does not ask for it, but it is the 
 
 Batching does nothing for payment. You cannot put a hundred authorizations in one transaction, each can decline independently, and the latency is somebody else's. Little's Law supplies the only knob: `in-flight = throughput × latency`, so 200 payments/s at 500 ms needs 100 concurrent. Conversely, parallelism did comparatively little for the claim — [`prototype/postgres-pool/`](./prototype/postgres-pool/) measured unbatched parallel claiming at 5 514/s against 37 000+/s for one batching worker.
 
-**So they must be separate stages with separate queues and opposite consumer topologies.** The attempts queue keeps `x-single-active-consumer` and batching; the payments queue gets **many competing consumers with high prefetch**, no ordering, retries and a dead-letter queue. Worth noting for implementation: in Node that concurrency comes from prefetch plus async I/O, not from process count — one worker with `prefetch: 100` holds 100 payments in flight. Process count is for fault isolation, not throughput.
+**So they must be separate stages with separate queues and opposite consumer topologies.** The attempts queue keeps `x-single-active-consumer` and batching; the payments queue gets **many competing consumers with high prefetch**, no ordering, retries and a dead-letter queue. It is also quorum-replicated (§5.1) and for a stronger reason than the attempts queue: losing a payment job leaves a user holding a reservation nobody will ever charge, which the reaper only resolves by taking their unit away. Worth noting for implementation: in Node that concurrency comes from prefetch plus async I/O, not from process count — one worker with `prefetch: 100` holds 100 payments in flight. Process count is for fault isolation, not throughput.
 
 This is also where RabbitMQ stops being merely adequate and starts earning its keep. Retry with exponential backoff, dead-lettering after N attempts, per-message TTL and idempotency keys are exactly what payment needs, and exactly the features named in §3 as its advantage over a Redis Stream.
 
