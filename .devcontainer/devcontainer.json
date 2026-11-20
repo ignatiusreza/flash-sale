@@ -12,8 +12,8 @@
     "15672": { "label": "rabbitmq management" }
   },
 
-  "//": "corepack enable needs root in this image — /usr/local/bin is not writable by `node` — and the image's own pnpm would otherwise shadow the packageManager pin.",
-  "postCreateCommand": "sudo corepack enable && pnpm install --frozen-lockfile",
+  "//": "Array form, deliberately: it is executed directly rather than through a shell, so there is no `&&` or `sudo` to be parsed differently by each editor. Zed fails on the string form. The image already ships a pnpm matching the packageManager pin, so corepack enable — which would need root here — is not required; if that pin moves far enough to diverge from the image, add corepack back via a Dockerfile stage rather than a lifecycle script.",
+  "postCreateCommand": ["pnpm", "install", "--frozen-lockfile"],
   "remoteUser": "node",
 
   "customizations": {
