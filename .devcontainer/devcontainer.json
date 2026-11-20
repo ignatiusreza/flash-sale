@@ -1,0 +1,35 @@
+{
+  "name": "flash-sale",
+  "dockerComposeFile": ["../docker-compose.yml", "docker-compose.yml"],
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+
+  "forwardPorts": [3000, 5173, 15672],
+  "portsAttributes": {
+    "3000": { "label": "api" },
+    "5173": { "label": "web" },
+    "15672": { "label": "rabbitmq management" }
+  },
+
+  "//": "Array form, deliberately: it is executed directly rather than through a shell, so there is no `&&` or `sudo` to be parsed differently by each editor. Zed fails on the string form. The image already ships a pnpm matching the packageManager pin, so corepack enable — which would need root here — is not required; if that pin moves far enough to diverge from the image, add corepack back via a Dockerfile stage rather than a lifecycle script.",
+  "postCreateCommand": ["pnpm", "install", "--frozen-lockfile"],
+  "remoteUser": "node",
+
+  "customizations": {
+    "//": "Zed reads this same file and has its own `zed` key here, but extensions declared under it also install into the local Zed instance, so project settings live in .zed/settings.json instead where they stay scoped to the project.",
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "eslint.useFlatConfig": true,
+        "typescript.tsdk": "node_modules/typescript/lib"
+      }
+    }
+  }
+}

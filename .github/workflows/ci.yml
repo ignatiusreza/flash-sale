@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      # Run the suite twice. A suite that only passes in UTC cannot catch code
+      # that depends on the process's local zone — see docs/PLAN.md §9.1, §11.
+      - name: Test (UTC)
+        run: pnpm test
+        env:
+          TZ: UTC
+
+      - name: Test (non-UTC)
+        run: pnpm test
+        env:
+          TZ: America/St_Johns
+
+      - name: Licences
+        run: pnpm licenses:check
+
+      - name: Audit
+        run: pnpm audit --audit-level=high

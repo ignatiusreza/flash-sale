@@ -1,0 +1,11 @@
+pnpm-lock.yaml
+dist/
+coverage/
+node_modules/
+
+# Prose, not code. Prettier rewrites emphasis markers and realigns tables,
+# which is churn on reviewed documents with no readability gain.
+*.md
+
+# Throwaway benchmark harnesses, ignored by ESLint for the same reason.
+docs/prototype/
