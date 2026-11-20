@@ -107,21 +107,124 @@ RETURNING id;
 
 An empty result means "no unit taken", for either reason — sold out, or this user already holds one. The worker distinguishes the two from its in-memory buyer set, which is cheap and never authoritative.
 
-**This is already verified.** A spike at [`prototype/postgres-claim/`](./prototype/postgres-claim/) runs it against a real Postgres 18 under `pgbench`. All numbers below are measured, not estimated:
+This single-claim form is correct but slow (§4.3): it pays an fsync per purchase. The worker ships the batched form below.
+
+### 4.1 The batch claim
+
+The batch takes an array of user ids **in arrival order** and claims as many as stock allows:
+
+```sql
+WITH input AS (
+  SELECT user_id, ord
+  FROM unnest($2::text[]) WITH ORDINALITY AS t(user_id, ord)
+),
+locked AS (
+  SELECT remaining FROM sales WHERE id = $1 FOR UPDATE
+),
+candidate AS (
+  SELECT i.user_id FROM input i, locked l WHERE i.ord <= l.remaining
+),
+ins AS (
+  INSERT INTO orders (sale_id, user_id)
+  SELECT $1, user_id FROM candidate
+  ON CONFLICT (sale_id, user_id) DO NOTHING
+  RETURNING user_id
+)
+UPDATE sales SET remaining = remaining - (SELECT count(*) FROM ins)
+WHERE id = $1
+RETURNING remaining, (SELECT array_agg(user_id) FROM ins) AS winners;
+```
+
+Three properties, each load-bearing and each verified in §4.4:
+
+1. **It decrements by rows *actually inserted*, not by batch size.** This is what makes a redelivered batch a no-op: on redelivery every user already has an order, `ins` returns zero rows, and the decrement is zero. The obvious alternative — `remaining - array_length($2)` — would double-decrement on every redelivery and silently destroy stock. Since RabbitMQ delivery is at-least-once, this is not a hypothetical.
+2. **`ord <= remaining` preserves arrival order.** When a batch straddles sellout, the earliest arrivals win. The brief asks for fairness; this is where it is implemented.
+3. **Duplicates inside one batch cost one unit, not several.** `ON CONFLICT DO NOTHING` tolerates the same user appearing twice in a single statement, and because the decrement follows the insert count, stock stays correct.
+
+`FOR UPDATE` is defence in depth. With one active consumer there is no concurrency to guard against, but it means the statement is still correct if a second worker is ever running — during a botched failover, say.
+
+### 4.2 How batching works in the worker
+
+RabbitMQ has no "give me 100 messages" call; `amqplib` pushes one at a time. Batching is therefore something the worker does, with a size-or-time flush:
+
+```ts
+const BATCH_MAX = 100;
+const FLUSH_MS  = 5;
+
+await channel.prefetch(BATCH_MAX * 2);   // keep the next batch arriving while this one commits
+
+let pending: Message[] = [];
+let timer: NodeJS.Timeout | null = null;
+let flushing: Promise<void> = Promise.resolve();
+
+channel.consume(queue, (msg) => {
+  pending.push(msg);
+  if (pending.length >= BATCH_MAX) scheduleFlush();
+  else timer ??= setTimeout(scheduleFlush, FLUSH_MS);
+});
+
+// Serialised: batches must never overlap, see the gotchas below.
+function scheduleFlush() {
+  flushing = flushing.then(flush);
+}
+
+async function flush() {
+  if (timer) { clearTimeout(timer); timer = null; }
+  const batch = pending;
+  pending = [];
+  if (batch.length === 0) return;
+
+  // In-memory pre-filter: never ask the database about a user we know holds
+  // an order, and never ask at all once we know stock is gone.
+  const { candidates, rejected } = prefilter(batch, state);
+
+  const winners = candidates.length ? await claimBatch(saleId, candidates) : [];
+
+  channel.ack(batch[batch.length - 1], /* allUpTo */ true);   // AFTER commit
+  publishResults(batch, winners, rejected);                   // one fanout message
+}
+```
+
+Four things that are easy to get wrong:
+
+- **Flushes must not overlap.** `channel.ack(msg, true)` acks every delivery up to that tag. If two batches are in flight at once, acking the later one also acks the earlier one — whose transaction may not have committed. Chaining flushes through a single promise costs one line and removes the whole class of bug.
+- **Ack strictly after commit.** This is the entire crash-safety story. Commit-then-die leaves the batch unacked, it gets redelivered, and §4.1 makes the replay a no-op. Ack-then-commit would lose purchases.
+- **Prefetch must exceed the batch size.** Prefetch caps unacked deliveries; if it equals `BATCH_MAX` the broker stops sending the moment a batch is assembled, and the worker idles through the commit instead of accumulating the next one. Twice the batch size keeps the pipeline full.
+- **Publish results as one message, not one per attempt.** A batch of 100 produces one fanout message carrying 100 outcomes; each API instance filters it against its own socket map. Per-attempt messages would put the fan-out cost back into the hot path.
+
+**The flush trigger makes this self-tuning**, which is the part worth noting in the README. Under light load the timer fires first, so batches are small and latency is ~5 ms. Under a burst the size trigger fires first, so batches are full and throughput is maximal. Batches grow exactly when they need to, and no one has to choose between latency and throughput up front.
+
+### 4.3 Measurements
+
+A spike at [`prototype/postgres-claim/`](./prototype/postgres-claim/) runs all of this against a real Postgres 18.6 under `pgbench`, default config (`synchronous_commit=on`). Measured, not estimated:
 
 | Scenario | Result |
 |---|---|
 | 20 000 attempts (50 connections) against stock of 1000 | **exactly 1000 orders, 1000 distinct users, `remaining` = 0** — no oversell |
 | Serial worker, 1 claim per transaction | 835 claims/s, 1.2 ms mean |
-| Serial worker, 100 claims per transaction | **~23 650 claims/s**, 4.2 ms per batch |
+| Serial worker, 100 claims, multi-statement transaction | ~23 650 claims/s, 4.2 ms per batch |
+| Serial worker, 100 claims, **single-statement batch (§4.1)** | **~37 000–41 500 claims/s**, 2.4–2.7 ms per batch |
 | 50 connections contending on the stock row | 899 claims/s, **55.6 ms mean** |
 | Post-sellout rejections | ~17k/s even when they reach Postgres |
 
-Three conclusions drive the rest of the design:
+Four conclusions drive the rest of the design:
 
-1. **Batching is not an optimisation, it is the design.** 835/s would miss the 10k/s target by an order of magnitude; batching 100 claims per transaction clears it 2.4×. The cost is fsync per commit, so amortising the commit is where all the throughput lives.
-2. **Contention is real and the queue is what avoids it.** 50× the concurrency bought 7% more throughput and 46× the latency. That is the lock convoy, measured, and it is the strongest argument for serializing upstream.
-3. **The rejection path is cheap even at its worst.** Post-sellout rejections sustained ~17k/s *while still hitting Postgres*. Since §6 rejects them in memory instead, the real ceiling is far higher — and the expensive path is bounded by `totalStock`, not by traffic.
+1. **Batching is not an optimisation, it is the design.** 835/s would miss the 10k/s target by an order of magnitude; the batched form clears it ~4×. The cost is the fsync per commit, so amortising the commit is where all the throughput lives.
+2. **Round trips cost as much as the work.** Collapsing `BEGIN / UPDATE / INSERT / COMMIT` into one statement was worth ~1.6× on its own — 23 650 → ~41 500 claims/s — for identical database work. At this granularity the network dominates, which is why §4.1 is one statement and not a transaction block.
+3. **Contention is real and the queue is what avoids it.** 50× the concurrency bought 7% more throughput and 46× the latency. That is the lock convoy, measured, and it is the strongest argument for serializing upstream.
+4. **The rejection path is cheap even at its worst.** Post-sellout rejections sustained ~17k/s *while still hitting Postgres*. Since §6 rejects them in memory instead, the real ceiling is far higher — and the expensive path is bounded by `totalStock`, not by traffic.
+
+### 4.4 Verified batch behaviour
+
+| Case | Expected | Result |
+|---|---|---|
+| Batch of 100, stock 1000 | 100 granted, 900 remaining | ✅ |
+| Batch of 100, stock 5 | 5 granted, 0 remaining | ✅ |
+| Same batch, by arrival order | first five win | ✅ `b001…b005` |
+| **Redelivery of a committed batch** | 0 granted, stock unchanged, no new orders | ✅ idempotent |
+| Same user three times in one batch | 1 granted, 1 unit consumed | ✅ |
+| Batch against stock 0 | 0 granted | ✅ |
+| Two batches straddling sellout | `orders = total_stock - remaining` | ✅ 50 orders, 0 remaining |
 
 ## 5. Durability and failure modes
 
@@ -282,7 +385,7 @@ Named in the README so their absence reads as a decision rather than an oversigh
 
 ## 15. Extension: what the next 10× would need
 
-The single active consumer is the ceiling, and §4 puts it at ~23 650 claims/s batched. Two routes past it, in order of preference:
+The single active consumer is the ceiling, and §4.3 puts it at ~37 000–41 500 claims/s batched. Two routes past it, in order of preference:
 
 1. **Shard the stock.** Partition `sales` into K bucket rows with one active consumer per partition, routed by a hash of `userId`. Add stock stealing when a bucket empties, so the tail of the sale does not strand inventory in a quiet shard. The claim statement is unchanged; only the routing key and the rebalance logic are new.
 2. **Admission filter in front of the queue.** Put the Redis Lua grant from [`prototype/redis-grant/`](./prototype/redis-grant/) — measured at ~210 000 ops/s — ahead of RabbitMQ purely to reject losers in sub-millisecond time, letting only winners through to the authoritative transaction. This reintroduces Redis, so it is worth doing only if the stress numbers demand it. The transactional core does not change.
@@ -296,4 +399,4 @@ Nothing here blocks a start; each has a stated default I will proceed under.
 1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with in-memory adapters for the queue and store so unit tests run with no containers.*
 2. **How long is the exercise meant to take?** The phasing above is ~17 hours. *Default: build phases 0–4 and 7 to a high standard, then 5–6 as time allows.*
 3. **Should the stress test run in CI?** It needs sustained load and will be slow and noisy on shared runners. *Default: the two invariant tests run in CI; the full k6 run is manual, with its results committed.*
-4. **How large is the batch window?** 100 claims per transaction is measured, but the right value trades latency against throughput and depends on burst shape. *Default: batch by size **or** a few milliseconds of wall time, whichever comes first, and tune against the stress results.*
+4. **How large is the batch window?** 100 claims per transaction and a 5 ms flush are what §4.2 assumes and §4.3 measures, but the pair trades latency against throughput and the right values depend on burst shape. *Default: ship those, instrument batch-size distribution and flush-reason, and tune against the stress results rather than guessing up front.*
