@@ -39,6 +39,8 @@ async function main(): Promise<void> {
     rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
     publish: (attempt) => publishAttempt(channel, queue, attempt),
     logger: true,
+    ...(config.WEB_ROOT ? { webRoot: config.WEB_ROOT } : {}),
+    trustProxy: config.TRUST_PROXY,
   });
 
   // Listen before attaching the gateway: Socket.IO needs the underlying server,

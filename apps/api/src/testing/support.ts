@@ -29,6 +29,9 @@ export interface TestServerOptions {
   pool?: pg.Pool;
   rateLimitPerMinute?: number;
   publish?: (attempt: unknown) => Promise<void>;
+  /** Directory of a built SPA. Omitted, the server is API-only. */
+  webRoot?: string;
+  trustProxy?: boolean | string[];
 }
 
 export interface TestServer {
@@ -51,6 +54,8 @@ export async function createTestServer(options: TestServerOptions = {}): Promise
     saleId: 'flash',
     rateLimitPerMinute: options.rateLimitPerMinute ?? 1000,
     publish,
+    ...(options.webRoot ? { webRoot: options.webRoot } : {}),
+    ...(options.trustProxy === undefined ? {} : { trustProxy: options.trustProxy }),
   });
 
   return { app, published };

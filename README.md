@@ -4,7 +4,7 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 4 of 8.** The claim, the queue, the HTTP API and the realtime layer are implemented and tested; the frontend lands in phase 5. See `docs/PLAN.md` §13.
+> **Status: phase 5 of 8.** The system works end to end — claim, queue, API, realtime and frontend. Remaining: E2E tests, stress tests and the write-up. See `docs/PLAN.md` §13.
 
 ## API
 
@@ -38,17 +38,32 @@ The first asserts on grants *returned to callers* as well as rows in the table. 
 
 ## Getting started
 
+To see the whole thing running:
+
+```sh
+docker compose --profile app up -d --wait   # everything, built
+open http://localhost:8080
+```
+
+To work on it, with watching and reload:
+
 ```sh
 pnpm install
-docker compose up -d --wait   # Postgres + RabbitMQ
-pnpm dev                      # everything else
+docker compose up -d --wait   # Postgres + RabbitMQ only
+pnpm dev                      # API, worker and web dev server
 ```
+
+The application services sit behind a Compose profile so they do not start by default — `pnpm dev` runs them on the host, and the two would otherwise fight over the same ports.
+
+There are only two application services, `api` and `worker`. The API serves the HTTP API, the WebSocket *and* the built frontend on one origin, so it is the only one publishing a port. Routing a browser between a SPA and an API is a deployment concern, left to whatever is already in front — an Ingress or HTTPRoute under Kubernetes, a CDN in production, the Vite proxy in development (docs/PLAN.md §12.1).
 
 `pnpm dev` is the whole stack: it discovers the service ports from Compose, builds once, applies migrations, seeds a sale if none exists, then runs the TypeScript watcher, the API, the worker and the web dev server with labelled output. Ctrl-C stops all of them.
 
 | Variable | Default | |
 | --- | --- | --- |
 | `PORT` | `3000` | API port |
+| `WEB_ROOT` | — | directory of the built SPA; unset, the process is a pure API |
+| `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
 | `SEED_STOCK` | `100` | units in the seeded sale |
 | `SEED_DURATION_MINUTES` | `60` | how long it stays open |
 | `SEED_RESET` | — | `1` to recreate the sale and drop its orders |
@@ -66,10 +81,43 @@ The services are published on **non-default host ports**, so they cannot clash w
 | Postgres | `15432` | `POSTGRES_PORT` |
 | RabbitMQ | `15673` | `RABBITMQ_PORT` |
 | RabbitMQ management UI | `15674` | `RABBITMQ_UI_PORT` |
+| Application (`--profile app`) | `8080` | `APP_PORT` |
 
 Compose reads a `.env` file in the repo root, so an override can be set once rather than on every command.
 
 They are *published* rather than left ephemeral on purpose: Zed's dev-container support parses `docker compose config` with a deserializer that requires a `published` field on every port, and an unpublished port omits it — the container then fails to start with a YAML deserialization error.
+
+### Running it without Compose
+
+The app is two plain Node processes and needs nothing but a Postgres and a RabbitMQ it can reach, so pointing it at ones already running on your machine is just environment:
+
+```sh
+pnpm build
+export DATABASE_URL=postgres://user:pass@localhost:5432/flashsale
+export RABBITMQ_URL=amqp://user:pass@localhost:5672
+pnpm migrate                                        # schema
+pnpm seed                                           # a sale to buy from
+node apps/worker/dist/index.js &                    # the claim worker
+WEB_ROOT=apps/web/dist node apps/api/dist/index.js  # API + frontend on :3000
+```
+
+`pnpm dev` does this for you against the Compose services, and honours `DATABASE_URL`/`RABBITMQ_URL` when they are already set, so the same command works inside a devcontainer.
+
+### Deploying behind an ingress or gateway
+
+Nothing here assumes Compose. Two images (`api`, `worker`), a Service for the API, and an HTTPRoute or Ingress sending `/` to it is the whole topology — the API already serves the API, the socket and the SPA on one origin, so there is no reverse proxy to template and no second Deployment to run.
+
+Set **`TRUST_PROXY`** to the gateway's address or CIDR when you do. It decides whether `request.ip` comes from the socket or from `X-Forwarded-For`, and `request.ip` is what the per-IP rate limiter keys on, so it is a security setting:
+
+| `TRUST_PROXY` | `request.ip` | |
+| --- | --- | --- |
+| unset / `false` | the socket peer | right when clients connect directly |
+| `10.0.0.0/8`, `loopback`, … | the client, as reported by a proxy you named | the safe setting behind a gateway |
+| `true` | whatever the client sent | the client picks its own rate-limit bucket; only safe if nothing but the gateway can reach the process |
+
+A hop count is **rejected at boot**: Fastify maps a numeric `trustProxy` to a function that trusts nothing, so accepting one would look configured while doing nothing.
+
+To serve the frontend from a CDN or bucket instead, leave `WEB_ROOT` unset and route `/` there. The image is the same.
 
 ### Running the gates inside Docker
 

@@ -19,4 +19,8 @@ export interface ServerDeps {
   readonly logger?: boolean;
   /** Serve the OpenAPI document and its UI. On by default. */
   readonly docs?: boolean;
+  /** Directory of the built SPA. Unset, this serves the API alone. */
+  readonly webRoot?: string;
+  /** Whether `X-Forwarded-For` may be believed; see `config.ts`. */
+  readonly trustProxy?: boolean | string[];
 }
