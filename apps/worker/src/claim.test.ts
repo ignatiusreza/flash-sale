@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
@@ -6,7 +8,12 @@ import { createPool } from './db.js';
 import { migrate } from './migrate.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
-const SALE = 'flash';
+
+// Every test gets its own sale rather than sharing one and deleting between
+// cases. Vitest runs files in parallel, so a shared row plus a DELETE makes two
+// suites quietly destroy each other's fixtures — which looks exactly like a bug
+// in the code under test (docs/PLAN.md §11).
+let SALE: string;
 
 // Skipped on a bare checkout so `pnpm test` stays green; runs in the compose
 // `runner` service and in CI, which both provide a Postgres.
@@ -16,8 +23,7 @@ let pool: pg.Pool;
 
 async function seed(options: { stock: number; startsIn?: number; endsIn?: number }): Promise<void> {
   const { stock, startsIn = -60_000, endsIn = 3_600_000 } = options;
-  await pool.query('DELETE FROM orders');
-  await pool.query('DELETE FROM sales');
+  SALE = `claim-${randomUUID()}`;
   await pool.query(
     `INSERT INTO sales (id, total_stock, remaining, start_at, end_at)
      VALUES ($1, $2, $2, now() + ($3 || ' milliseconds')::interval, now() + ($4 || ' milliseconds')::interval)`,
@@ -27,8 +33,8 @@ async function seed(options: { stock: number; startsIn?: number; endsIn?: number
 
 async function counts() {
   const { rows } = await pool.query<{ orders: string; remaining: number; users: string }>(
-    `SELECT (SELECT count(*) FROM orders)::text AS orders,
-            (SELECT count(DISTINCT user_id) FROM orders)::text AS users,
+    `SELECT (SELECT count(*) FROM orders WHERE sale_id = $1)::text AS orders,
+            (SELECT count(DISTINCT user_id) FROM orders WHERE sale_id = $1)::text AS users,
             (SELECT remaining FROM sales WHERE id = $1) AS remaining`,
     [SALE],
   );
@@ -38,7 +44,7 @@ async function counts() {
 
 describeDb('claim', () => {
   beforeAll(async () => {
-    pool = createPool(DATABASE_URL!, 60);
+    pool = createPool(DATABASE_URL!, 30);
     await migrate(pool);
   });
 

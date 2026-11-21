@@ -4,7 +4,7 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 1 of 8.** The claim is implemented and its invariants are proven; the queue, API, WebSocket layer and frontend land in phases 2–5. See `docs/PLAN.md` §13.
+> **Status: phase 2 of 8.** The claim and the queue around it are implemented and tested; the API, WebSocket layer and frontend land in phases 3–5. See `docs/PLAN.md` §13.
 
 ## The claim
 
@@ -48,9 +48,11 @@ They are *published* rather than left ephemeral on purpose: Zed's dev-container 
 The `runner` service builds the `test` stage of the `Dockerfile` and reaches the services **by name** over the compose network, so no host port is involved at all:
 
 ```sh
-docker compose run --rm runner              # the whole verify gate
-docker compose run --rm runner pnpm test    # or any other script
+docker compose run --build --rm runner              # the whole verify gate
+docker compose run --build --rm runner pnpm test    # or any other script
 ```
+
+**`--build` is not optional.** The image bakes the source at build time, so without it `run` silently reuses the last image and tests your previous edit — which looks exactly like a change that did not work.
 
 `tests/integration/services.test.ts` asserts exactly that — it is skipped on a bare checkout and runs here. The `Dockerfile` also has `api` and `worker` targets that ship production dependencies only; neither has a server to run until phases 2–4.
 

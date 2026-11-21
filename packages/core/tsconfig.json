@@ -3,7 +3,11 @@
   "compilerOptions": {
     "composite": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // Deliberately empty: this package is bundled into the browser, so it must
+    // not reach for `process`, `Buffer` or any other Node global. Omitting the
+    // ambient types makes that a compile error rather than a runtime surprise.
+    "types": []
   },
   "include": ["src/**/*.ts"],
   "//": "Tests are typechecked by the root tsconfig.test.json, not emitted here — a compiled test in dist gets collected and run twice.",

@@ -1,29 +1,63 @@
+import {
+  assertTopology,
+  publishResults,
+  ROUTING_KEY_RESULTS,
+  startBatchConsumer,
+} from '@flash-sale/messaging';
+import amqp from 'amqplib';
+
 import { createPool } from './db.js';
+import { handleBatch } from './handler.js';
 import { migrate } from './migrate.js';
 
-export { claimBatch, claimOne, type ClaimResult, type Grant } from './claim.js';
+export { claimBatch, claimOne, findExistingOrders, type ClaimResult, type Grant } from './claim.js';
 export { createPool, type Queryable } from './db.js';
+export { handleBatch } from './handler.js';
 export { migrate } from './migrate.js';
 
 /**
- * Phase 0–1 entrypoint: applies migrations and exits. The consumer loop that
- * drives `claimBatch` arrives in phase 2, once there is a queue to read from
- * (docs/PLAN.md §13).
+ * The single active consumer. RabbitMQ's `x-single-active-consumer` means
+ * several of these can run: one is active, and the broker promotes another if
+ * it dies, without the serialization ever being broken.
  */
 async function main(): Promise<void> {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error('DATABASE_URL is required');
+  const databaseUrl = process.env.DATABASE_URL;
+  const rabbitUrl = process.env.RABBITMQ_URL;
+  const saleId = process.env.SALE_ID ?? 'flash';
+  if (!databaseUrl) throw new Error('DATABASE_URL is required');
+  if (!rabbitUrl) throw new Error('RABBITMQ_URL is required');
 
-  const pool = createPool(url);
-  try {
-    await migrate(pool, (message) => console.warn(message));
-    console.warn('migrations up to date');
-  } finally {
+  const pool = createPool(databaseUrl);
+  await migrate(pool, (message) => console.warn(message));
+
+  const connection = await amqp.connect(rabbitUrl);
+  const channel = await connection.createConfirmChannel();
+  const { queue, exchange } = await assertTopology(channel);
+
+  const consumer = await startBatchConsumer({
+    channel,
+    queue,
+    handle: async (attempts) => {
+      const message = await handleBatch(pool, saleId, attempts);
+      // After the commit, never before: see startBatchConsumer.
+      publishResults(channel, exchange, ROUTING_KEY_RESULTS, message);
+    },
+    onError: (error) => console.error(error),
+  });
+
+  console.warn(`worker consuming ${queue} as ${consumer.consumerTag}`);
+
+  const shutdown = async () => {
+    await consumer.stop();
+    await channel.close();
+    await connection.close();
     await pool.end();
-  }
+  };
+  process.once('SIGINT', () => void shutdown());
+  process.once('SIGTERM', () => void shutdown());
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop()!)) {
+if (process.argv[1]?.endsWith('index.js')) {
   main().catch((error: unknown) => {
     console.error(error);
     process.exitCode = 1;
