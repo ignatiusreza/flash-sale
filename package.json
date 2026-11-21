@@ -9,6 +9,9 @@
   },
   "scripts": {
     "build": "tsc -b && pnpm --filter @flash-sale/web build",
+    "dev": "node scripts/dev.mjs",
+    "migrate": "pnpm --filter @flash-sale/worker migrate",
+    "seed": "pnpm --filter @flash-sale/worker seed",
     "clean": "tsc -b --clean && rm -rf apps/web/dist",
     "typecheck": "tsc -b && tsc -p tsconfig.test.json && pnpm --filter @flash-sale/web typecheck",
     "lint": "eslint .",

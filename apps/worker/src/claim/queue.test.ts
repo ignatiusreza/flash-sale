@@ -12,9 +12,9 @@ import amqp, { type ChannelModel, type ConfirmChannel } from 'amqplib';
 import type pg from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { createPool } from './db.js';
+import { createPool } from '../db/pool.js';
 import { handleBatch } from './handler.js';
-import { migrate } from './migrate.js';
+import { migrate } from '../db/migrate.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const RABBITMQ_URL = process.env.RABBITMQ_URL;
@@ -67,6 +67,10 @@ describeQueue('queue wiring', () => {
   });
 
   afterAll(async () => {
+    // See claim.test.ts: per-test sales isolate suites but would otherwise
+    // pile up in the database the dev stack also uses.
+    await pool?.query("DELETE FROM orders WHERE sale_id LIKE 'queue-%'");
+    await pool?.query("DELETE FROM sales WHERE id LIKE 'queue-%'");
     await connection?.close();
     await pool?.end();
   });

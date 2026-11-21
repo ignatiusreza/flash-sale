@@ -280,6 +280,8 @@ Deliberately **not** filtered at the API layer: "already purchased". It needs a 
 
 Rate limiting still applies on top: a per-IP and per-user token bucket, rejecting with `429`. Not in the brief, but an endpoint this attractive without a limiter is a conspicuous omission.
 
+The limiter is `@fastify/rate-limit`, whose default store is **in process, not shared**, so the effective limit across N instances is N times the configured one. That is a real weakening and it is stated rather than hidden: a shared counter would need a store on the path of every request, and this design deliberately has none. The limiter exists to blunt a single abusive client; the bounded queue (§5) and the claim (§4) are what actually protect the sale, and neither depends on it.
+
 ## 7. API surface
 
 | Method | Path | Returns |
@@ -431,6 +433,19 @@ docker-compose.yml   README.md
 
 pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. ESLint flat config with `typescript-eslint` for correctness, Prettier for formatting and nothing else, `tsc --noEmit` under `strict`, `pnpm audit --audit-level=high`, and a licence allowlist check — all five gating CI rather than advisory, per [`CLAUDE.md`](../CLAUDE.md). Every runtime dependency named above is MIT or Apache-2.0, so the allowlist costs nothing to satisfy; it exists to catch what arrives transitively. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
 
+### 12.1 Serving the frontend — open, and owed a decision in phase 5
+
+Today the Vite dev server proxies `/api` and `/socket.io` to the API, which works for development and **quietly leaves production unanswered**: `vite build` produces `apps/web/dist` and nothing serves it. There is no `web` target in the Dockerfile.
+
+[`@fastify/vite`](https://vite.fastify.dev/) closes both ends in about eight lines — Vite as middleware in development, the built bundle in production — and would drop a process and the proxy block from `pnpm dev`. It is the obvious answer for development and is adopted in phase 5.
+
+Production is the part that needs deciding rather than defaulting:
+
+- **Served by the API.** Simplest, one artefact, one command. But every horizontally-scaled replica then also serves static files, on precisely the process this design exists to keep responsive under load — and the `api` image has to carry `apps/web/dist`, coupling two builds that are otherwise independent.
+- **Served by a CDN or static host.** What a real flash sale does. Assets are immutable and cacheable, the API tier stays dedicated to the API, and the two deploy separately. It costs a second deployment target that the brief explicitly does not require.
+
+The decision is deferred rather than dodged: it changes what goes into the `api` image, so it is worth making once the frontend exists rather than guessing now against a placeholder page.
+
 Two infrastructure components, not three — dropping Redis is a direct consequence of the queue owning the decision, and it is worth calling out in the README as a simplification rather than leaving it unremarked.
 
 ## 13. Implementation phases
@@ -444,7 +459,7 @@ Ordered so the risky part is proven first. Estimates are for a focused build.
 | 2 | Queue wiring | amqplib, publisher confirms, quorum queue declaration, single-active-consumer, bounded queue, redelivery idempotency tests | 2–3 h |
 | 3 | API | Fastify routes, three-tier early rejection, rate limiting, status cache | 2–3 h |
 | 4 | WebSocket | Socket.IO, fanout consumption, local socket map, presence aggregation | 2–3 h |
-| 5 | Frontend | React page, queued state, terminal states, viewer count | 2–3 h |
+| 5 | Frontend | React page, queued state, terminal states, viewer count, **and how it is served** (§12.1) | 3–4 h |
 | 6 | **E2E** | Playwright: purchase flow, reconnect, presence, timezone/clock, rejections; test-only seed endpoint | 2–3 h |
 | 7 | Stress | k6 scenarios incl. WebSocket result latency and load shedding | 2–3 h |
 | 8 | Write-up | README, Mermaid diagram, trade-offs, run instructions, stress summary | 2 h |

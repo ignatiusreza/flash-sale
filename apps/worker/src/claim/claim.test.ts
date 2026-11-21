@@ -4,8 +4,8 @@ import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { claimBatch, claimOne } from './claim.js';
-import { createPool } from './db.js';
-import { migrate } from './migrate.js';
+import { createPool } from '../db/pool.js';
+import { migrate } from '../db/migrate.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -49,6 +49,11 @@ describeDb('claim', () => {
   });
 
   afterAll(async () => {
+    // Per-test sales keep suites independent, but they also accumulate: the
+    // dev stack shares this database, and without this every run leaves
+    // another few dozen rows behind for good.
+    await pool?.query("DELETE FROM orders WHERE sale_id LIKE 'claim-%'");
+    await pool?.query("DELETE FROM sales WHERE id LIKE 'claim-%'");
     await pool?.end();
   });
 

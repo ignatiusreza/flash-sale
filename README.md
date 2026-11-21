@@ -4,7 +4,20 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 2 of 8.** The claim and the queue around it are implemented and tested; the API, WebSocket layer and frontend land in phases 3–5. See `docs/PLAN.md` §13.
+> **Status: phase 3 of 8.** The claim, the queue around it and the HTTP API are implemented and tested; the WebSocket layer and frontend land in phases 4–5. See `docs/PLAN.md` §13.
+
+## API
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/sale` | status, coarse availability, window, `serverTime` — served from memory, no I/O |
+| `POST` | `/api/purchase` | `202 queued` once the broker confirms · `409` not started / ended / sold out · `429` · `503` busy |
+| `GET` | `/api/purchase/:userId` | the user's order, or `none` — the reconnect source of truth |
+| `GET` | `/healthz` `/readyz` | live as soon as the process is up; ready only once the sale is loaded |
+
+Interactive docs are served at **`/docs`**, with the OpenAPI document at `/docs/json`. The route schemas generate it, and Fastify compiles the same schemas for validation and response serialization — so documenting the API also makes it marginally faster.
+
+`POST /api/purchase` answers **202, not 200**: the outcome arrives over the socket in phase 4. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
 
 ## The claim
 
@@ -28,6 +41,21 @@ The first asserts on grants *returned to callers* as well as rows in the table. 
 ```sh
 pnpm install
 docker compose up -d --wait   # Postgres + RabbitMQ
+pnpm dev                      # everything else
+```
+
+`pnpm dev` is the whole stack: it discovers the service ports from Compose, builds once, applies migrations, seeds a sale if none exists, then runs the TypeScript watcher, the API, the worker and the web dev server with labelled output. Ctrl-C stops all of them.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `PORT` | `3000` | API port |
+| `SEED_STOCK` | `100` | units in the seeded sale |
+| `SEED_DURATION_MINUTES` | `60` | how long it stays open |
+| `SEED_RESET` | — | `1` to recreate the sale and drop its orders |
+
+Seeding is idempotent, so restarting never resets stock out from under whatever you were testing.
+
+```sh
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```
 
@@ -64,6 +92,25 @@ Both editors read the same `.devcontainer/devcontainer.json`, which builds on th
 - **Zed** — it prompts on opening the project, or run `Project: Open Remote` and choose the dev container. Zed needs Docker or Podman on `PATH`, and does not rebuild automatically after you edit `devcontainer.json`, so stop the container first.
 
 Inside the container the services are reachable by name — `postgres:5432`, `rabbitmq:5672` — already wired up as `DATABASE_URL` and `RABBITMQ_URL`. Host port clashes cannot affect that, because nothing inside goes through the host mapping. The API and web ports are published by Compose rather than left to editor-specific forwarding, so they behave the same in either editor and with no editor at all.
+
+#### If the container will not start
+
+`Bind for 0.0.0.0:3000 failed: port is already allocated` almost always means another copy of this project still has a container running — editors leave the Compose stack up when the window closes, so a session you finished hours ago can still hold the port. Find it and stop it:
+
+```sh
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep 3000
+docker stop <name>                      # reversible; volumes are untouched
+```
+
+Only one checkout can hold 3000 and 5173 at a time. To run two side by side — a worktree alongside the main checkout — give one of them its own ports in a `.env`:
+
+```sh
+API_PORT=3100
+WEB_PORT=5174
+POSTGRES_PORT=15442
+RABBITMQ_PORT=15683
+RABBITMQ_UI_PORT=15684
+```
 
 Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks.json` for Zed, `customizations.vscode` inside `devcontainer.json` for VS Code. Both set the same thing — Prettier owns formatting, ESLint fixes on save — so the gates behave identically whichever you use.
 
