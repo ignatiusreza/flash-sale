@@ -10,11 +10,6 @@ import { createPool } from './db.js';
 import { handleBatch } from './handler.js';
 import { migrate } from './migrate.js';
 
-export { claimBatch, claimOne, findExistingOrders, type ClaimResult, type Grant } from './claim.js';
-export { createPool, type Queryable } from './db.js';
-export { handleBatch } from './handler.js';
-export { migrate } from './migrate.js';
-
 /**
  * The single active consumer. RabbitMQ's `x-single-active-consumer` means
  * several of these can run: one is active, and the broker promotes another if

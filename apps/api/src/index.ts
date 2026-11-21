@@ -6,13 +6,6 @@ import { loadConfig } from './config.js';
 import { SaleCache } from './sale-cache.js';
 import { buildServer } from './server.js';
 
-export { admit, type Admission } from './admission.js';
-export { loadConfig, type Config } from './config.js';
-export { findOrder, type ExistingOrder } from './orders.js';
-export { TokenBucket } from './rate-limit.js';
-export { SaleCache, type SaleSnapshot, type SaleView } from './sale-cache.js';
-export { buildServer, type ServerDeps } from './server.js';
-
 async function main(): Promise<void> {
   const config = loadConfig();
 
