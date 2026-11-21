@@ -15,6 +15,8 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 | `GET` | `/api/purchase/:userId` | the user's order, or `none` — the reconnect source of truth |
 | `GET` | `/healthz` `/readyz` | live as soon as the process is up; ready only once the sale is loaded |
 
+Interactive docs are served at **`/docs`**, with the OpenAPI document at `/docs/json`. The route schemas generate it, and Fastify compiles the same schemas for validation and response serialization — so documenting the API also makes it marginally faster.
+
 `POST /api/purchase` answers **202, not 200**: the outcome arrives over the socket in phase 4. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
 
 ## The claim

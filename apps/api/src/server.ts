@@ -1,12 +1,22 @@
 import { randomUUID } from 'node:crypto';
 
 import rateLimit from '@fastify/rate-limit';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import { PublishRejected, publishAttempt } from '@flash-sale/messaging';
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import type pg from 'pg';
 
 import { admit } from './admission.js';
 import { findOrder } from './orders.js';
+import {
+  healthSchema,
+  openApiDocument,
+  purchaseSchema,
+  purchaseStatusSchema,
+  readySchema,
+  saleSchema,
+} from './schemas.js';
 import type { SaleCache } from './sale-cache.js';
 
 export interface ServerDeps {
@@ -17,16 +27,9 @@ export interface ServerDeps {
   /** Publishes an attempt and resolves only once the broker confirms it. */
   readonly publish: (attempt: Parameters<typeof publishAttempt>[2]) => Promise<void>;
   readonly logger?: boolean;
+  /** Serve the OpenAPI document and its UI. On by default. */
+  readonly docs?: boolean;
 }
-
-const purchaseBody = {
-  type: 'object',
-  required: ['userId'],
-  additionalProperties: false,
-  properties: {
-    userId: { type: 'string', minLength: 1, maxLength: 128 },
-  },
-} as const;
 
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   const app = Fastify({
@@ -41,6 +44,13 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   // polled by every open tab by design, and limiting health checks would make
   // a busy instance look unhealthy.
   await app.register(rateLimit, { global: false });
+
+  // Registered before the routes: the spec is built from the schemas declared
+  // on them, so anything added afterwards would be missing from the document.
+  if (deps.docs ?? true) {
+    await app.register(swagger, openApiDocument);
+    await app.register(swaggerUi, { routePrefix: '/docs' });
+  }
 
   const limits = { max: deps.rateLimitPerMinute, timeWindow: 60_000 };
   const byIp = app.createRateLimit(limits);
@@ -66,16 +76,16 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       .send({ error: 'rate_limited' });
   }
 
-  app.get('/healthz', () => ({ status: 'ok' }));
+  app.get('/healthz', { schema: healthSchema }, () => ({ status: 'ok' }));
 
-  app.get('/readyz', async (_request, reply) => {
+  app.get('/readyz', { schema: readySchema }, async (_request, reply) => {
     // Ready means "can answer correctly", which needs the sale snapshot. A
     // process that is up but has never read the sale would admit everything.
     if (!deps.saleCache.healthy) return reply.code(503).send({ status: 'not_ready' });
     return { status: 'ready' };
   });
 
-  app.get('/api/sale', async (_request, reply) => {
+  app.get('/api/sale', { schema: saleSchema }, async (_request, reply) => {
     const view = deps.saleCache.view();
     if (!view) return reply.code(503).send({ error: 'sale_unavailable' });
 
@@ -87,16 +97,20 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     };
   });
 
-  app.get<{ Params: { userId: string } }>('/api/purchase/:userId', async (request, reply) => {
-    const { userId } = request.params;
-    const order = await findOrder(deps.pool, deps.saleId, userId);
-    if (!order) return reply.send({ status: 'none' });
-    return reply.send({ status: 'confirmed', ...order });
-  });
+  app.get<{ Params: { userId: string } }>(
+    '/api/purchase/:userId',
+    { schema: purchaseStatusSchema },
+    async (request, reply) => {
+      const { userId } = request.params;
+      const order = await findOrder(deps.pool, deps.saleId, userId);
+      if (!order) return reply.send({ status: 'none' });
+      return reply.send({ status: 'confirmed', ...order });
+    },
+  );
 
   app.post<{ Body: { userId: string } }>(
     '/api/purchase',
-    { schema: { body: purchaseBody } },
+    { schema: purchaseSchema },
     async (request, reply) => {
       const { userId } = request.body;
 

@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@fastify/rate-limit": "^11.2.2",
+    "@fastify/swagger": "^9.9.5",
+    "@fastify/swagger-ui": "^6.1.4",
     "@flash-sale/core": "workspace:*",
     "@flash-sale/messaging": "workspace:*",
     "@prometheus-io/client": "^0.16.1",
