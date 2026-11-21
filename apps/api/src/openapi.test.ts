@@ -3,21 +3,18 @@ import type pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildServer } from './server.js';
-import type { SaleCache, SaleView } from './sale-cache.js';
-
-const activeView: SaleView = {
-  status: 'active',
-  availability: 'plenty',
-  startAt: '2026-11-20T10:00:00.000Z',
-  endAt: '2026-11-20T11:00:00.000Z',
-};
+import { activeView, cacheOf } from './test-support.js';
 
 let app: FastifyInstance;
 
+/**
+ * Builds directly rather than through `createTestServer`, because the point
+ * here is the `docs` flag, which that helper deliberately leaves at default.
+ */
 function server(docs = true) {
   return buildServer({
     pool: {} as pg.Pool,
-    saleCache: { view: () => activeView, healthy: true } as unknown as SaleCache,
+    saleCache: cacheOf(activeView),
     saleId: 'flash',
     rateLimitPerMinute: 1000,
     publish: async () => {},
