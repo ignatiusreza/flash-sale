@@ -3,7 +3,7 @@ import amqp from 'amqplib';
 import pg from 'pg';
 
 import { loadConfig } from './config.js';
-import { SaleCache } from './sale-cache.js';
+import { SaleCache } from './sale/cache.js';
 import { buildServer } from './server.js';
 
 async function main(): Promise<void> {

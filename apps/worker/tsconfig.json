@@ -16,5 +16,5 @@
     }
   ],
   "//": "Tests and their fixtures are typechecked by the root tsconfig.test.json, not emitted here \u2014 otherwise they land in dist and ship inside the runtime image, importing vitest, which is not a production dependency.",
-  "exclude": ["src/**/*.test.ts", "src/**/test-support.ts"]
+  "exclude": ["src/**/*.test.ts", "src/testing/**"]
 }

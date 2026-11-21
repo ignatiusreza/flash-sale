@@ -1,7 +1,7 @@
 import type { publishAttempt } from '@flash-sale/messaging';
 import type pg from 'pg';
 
-import type { SaleCache } from './sale-cache.js';
+import type { SaleCache } from './sale/cache.js';
 
 /**
  * What every route needs, passed as plugin options.

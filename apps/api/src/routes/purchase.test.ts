@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { activeView, createTestServer } from '../test-support.js';
+import { activeView, createTestServer } from '../testing/support.js';
 
 let app: FastifyInstance;
 

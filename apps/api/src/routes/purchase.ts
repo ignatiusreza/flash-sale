@@ -3,11 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { PublishRejected } from '@flash-sale/messaging';
 import type { FastifyPluginAsync } from 'fastify';
 
-import { admit } from '../admission.js';
+import { admit } from '../sale/admission.js';
 import type { ServerDeps } from '../deps.js';
-import { errorResponse } from '../openapi.js';
-import { findOrder } from '../orders.js';
-import { rateLimit } from '../rate-limit.js';
+import { errorResponse } from '../http/openapi.js';
+import { findOrder } from '../orders/queries.js';
+import { rateLimit } from '../http/rate-limit.js';
 
 const purchaseSchema = {
   tags: ['purchase'],

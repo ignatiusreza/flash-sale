@@ -4,7 +4,14 @@ import { fileURLToPath } from 'node:url';
 
 import type pg from 'pg';
 
-const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+// Resolved from this file's compiled location: `dist/db/` is two levels below
+// the package root, where `migrations/` sits beside `dist/`.
+const MIGRATIONS_DIR = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  'migrations',
+);
 
 /** Arbitrary but fixed: two workers starting together must not both migrate. */
 const ADVISORY_LOCK_KEY = 8_164_201;

@@ -2,8 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildServer } from './server.js';
-import { activeView, cacheOf } from './test-support.js';
+import { buildServer } from '../server.js';
+import { activeView, cacheOf } from '../testing/support.js';
 
 let app: FastifyInstance;
 

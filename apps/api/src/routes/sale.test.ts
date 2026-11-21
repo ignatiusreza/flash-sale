@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { activeView, createTestServer, WINDOW } from '../test-support.js';
+import { activeView, createTestServer, WINDOW } from '../testing/support.js';
 
 let app: FastifyInstance;
 

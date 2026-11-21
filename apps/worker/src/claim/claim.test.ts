@@ -4,8 +4,8 @@ import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { claimBatch, claimOne } from './claim.js';
-import { createPool } from './db.js';
-import { migrate } from './migrate.js';
+import { createPool } from '../db/pool.js';
+import { migrate } from '../db/migrate.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 

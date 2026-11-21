@@ -1,4 +1,4 @@
-import type { Queryable } from './db.js';
+import type { Queryable } from '../db/pool.js';
 
 export interface Grant {
   readonly userId: string;

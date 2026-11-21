@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 
-import { buildServer } from './server.js';
-import type { SaleCache, SaleView } from './sale-cache.js';
+import { buildServer } from '../server.js';
+import type { SaleCache, SaleView } from '../sale/cache.js';
 
 /**
  * Shared fixtures for the route tests.

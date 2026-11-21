@@ -6,9 +6,9 @@ import {
 } from '@flash-sale/messaging';
 import amqp from 'amqplib';
 
-import { createPool } from './db.js';
-import { handleBatch } from './handler.js';
-import { migrate } from './migrate.js';
+import { createPool } from './db/pool.js';
+import { handleBatch } from './claim/handler.js';
+import { migrate } from './db/migrate.js';
 
 /**
  * The single active consumer. RabbitMQ's `x-single-active-consumer` means

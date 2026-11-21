@@ -1,4 +1,4 @@
-import type { SaleCache } from './sale-cache.js';
+import type { SaleCache } from './cache.js';
 
 export type Admission =
   | { readonly admit: true }

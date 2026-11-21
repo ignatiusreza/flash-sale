@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
 import type { ServerDeps } from '../deps.js';
-import { errorResponse } from '../openapi.js';
+import { errorResponse } from '../http/openapi.js';
 
 const saleSchema = {
   tags: ['sale'],

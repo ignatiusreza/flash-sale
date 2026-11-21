@@ -4,7 +4,7 @@ import swaggerUi from '@fastify/swagger-ui';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import type { ServerDeps } from './deps.js';
-import { openApiDocument } from './openapi.js';
+import { openApiDocument } from './http/openapi.js';
 import { healthRoutes } from './routes/health.js';
 import { purchaseRoutes } from './routes/purchase.js';
 import { saleRoutes } from './routes/sale.js';

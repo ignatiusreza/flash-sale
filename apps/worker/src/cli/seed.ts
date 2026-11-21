@@ -1,4 +1,4 @@
-import { createPool } from './db.js';
+import { createPool } from '../db/pool.js';
 
 /**
  * Ensures a sale exists, for development.

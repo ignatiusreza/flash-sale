@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 
-import { SaleCache } from './sale-cache.js';
+import { SaleCache } from './cache.js';
 
 const START = new Date('2026-11-20T10:00:00.000Z');
 const END = new Date('2026-11-20T11:00:00.000Z');

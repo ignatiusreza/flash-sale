@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
 import type { ServerDeps } from '../deps.js';
-import { statusResponse } from '../openapi.js';
+import { statusResponse } from '../http/openapi.js';
 
 const healthSchema = {
   tags: ['health'],
