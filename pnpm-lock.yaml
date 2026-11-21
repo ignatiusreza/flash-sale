@@ -214,6 +214,9 @@ importers:
       '@flash-sale/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@flash-sale/messaging':
+        specifier: workspace:*
+        version: link:../../packages/messaging
       '@prometheus-io/client':
         specifier: ^0.16.1
         version: 0.16.1

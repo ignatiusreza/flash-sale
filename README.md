@@ -4,7 +4,18 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 2 of 8.** The claim and the queue around it are implemented and tested; the API, WebSocket layer and frontend land in phases 3–5. See `docs/PLAN.md` §13.
+> **Status: phase 3 of 8.** The claim, the queue around it and the HTTP API are implemented and tested; the WebSocket layer and frontend land in phases 4–5. See `docs/PLAN.md` §13.
+
+## API
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/sale` | status, coarse availability, window, `serverTime` — served from memory, no I/O |
+| `POST` | `/api/purchase` | `202 queued` once the broker confirms · `409` not started / ended / sold out · `429` · `503` busy |
+| `GET` | `/api/purchase/:userId` | the user's order, or `none` — the reconnect source of truth |
+| `GET` | `/healthz` `/readyz` | live as soon as the process is up; ready only once the sale is loaded |
+
+`POST /api/purchase` answers **202, not 200**: the outcome arrives over the socket in phase 4. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
 
 ## The claim
 
