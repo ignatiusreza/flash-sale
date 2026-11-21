@@ -26,14 +26,21 @@ export const saleSchema = {
   summary: 'Current sale status',
   description:
     'Served entirely from an in-process cache refreshed on a timer, so it costs no I/O per request. ' +
-    'Exact remaining stock is deliberately not exposed; `availability` is coarse. ' +
+    'Exact remaining stock is deliberately not exposed; `availability` is coarse, and is **present ' +
+    'only while `status` is `active`** — an ended sale with units left is not "plenty available", ' +
+    'it is simply over. ' +
     '`serverTime` lets a client run a countdown without trusting its own clock.',
   response: {
     200: {
       type: 'object',
+      required: ['status', 'startAt', 'endAt', 'serverTime'],
       properties: {
         status: { type: 'string', enum: ['upcoming', 'active', 'ended'] },
-        availability: { type: 'string', enum: ['plenty', 'low', 'sold_out'] },
+        availability: {
+          type: 'string',
+          enum: ['plenty', 'low', 'sold_out'],
+          description: 'Only present while the sale is active.',
+        },
         startAt: { type: 'string', format: 'date-time' },
         endAt: { type: 'string', format: 'date-time' },
         serverTime: { type: 'string', format: 'date-time' },

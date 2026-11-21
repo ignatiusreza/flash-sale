@@ -49,6 +49,11 @@ describeDb('claim', () => {
   });
 
   afterAll(async () => {
+    // Per-test sales keep suites independent, but they also accumulate: the
+    // dev stack shares this database, and without this every run leaves
+    // another few dozen rows behind for good.
+    await pool?.query("DELETE FROM orders WHERE sale_id LIKE 'claim-%'");
+    await pool?.query("DELETE FROM sales WHERE id LIKE 'claim-%'");
     await pool?.end();
   });
 

@@ -11,7 +11,18 @@ export interface SaleSnapshot {
 
 export interface SaleView {
   readonly status: SaleStatus;
-  readonly availability: Availability;
+  /**
+   * Present only while the sale is active.
+   *
+   * Stock and the window are independent facts, so an ended sale with units
+   * left is genuinely "plenty" — and reporting that invites a client to show
+   * "plenty available" on a sale nobody can buy from. The claim already
+   * resolves the two in order, answering `ended` rather than `sold_out` when
+   * the window is closed (see the worker's handler); this keeps the status
+   * endpoint consistent with that by not answering a question that cannot be
+   * acted on.
+   */
+  readonly availability?: Availability;
   readonly startAt: string;
   readonly endAt: string;
 }
@@ -89,9 +100,13 @@ export class SaleCache {
   view(now = new Date()): SaleView | undefined {
     const snapshot = this.#snapshot;
     if (!snapshot) return undefined;
+
+    const status = saleStatusAt(snapshot, now);
     return {
-      status: saleStatusAt(snapshot, now),
-      availability: availabilityOf(snapshot.remaining, snapshot.totalStock),
+      status,
+      ...(status === 'active'
+        ? { availability: availabilityOf(snapshot.remaining, snapshot.totalStock) }
+        : {}),
       startAt: snapshot.startAt,
       endAt: snapshot.endAt,
     };

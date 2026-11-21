@@ -62,6 +62,29 @@ describe('GET /api/sale', () => {
     }
   });
 
+  it.each(['upcoming', 'ended'] as const)(
+    'does not invent an availability for a %s sale',
+    async (status) => {
+      // The cache omits availability outside the active window — an ended sale
+      // with stock left is genuinely "plenty", and saying so invites a client
+      // to offer a sale nobody can buy from. `sale-cache.test.ts` covers that
+      // decision; this covers the half the route owns, which is that the
+      // response schema neither fabricates the field nor rejects its absence.
+      app = await server({ view: { status, startAt: WINDOW.startAt, endAt: WINDOW.endAt } });
+      const body = (await app.inject({ method: 'GET', url: '/api/sale' })).json();
+
+      expect(body.status).toBe(status);
+      expect(body).not.toHaveProperty('availability');
+    },
+  );
+
+  it('reports availability while the sale is active', async () => {
+    app = await server({ view: { ...activeView, availability: 'low' } });
+    const body = (await app.inject({ method: 'GET', url: '/api/sale' })).json();
+
+    expect(body).toMatchObject({ status: 'active', availability: 'low' });
+  });
+
   it('is unavailable rather than wrong when the sale is not loaded', async () => {
     app = await server({ view: undefined });
     expect((await app.inject({ method: 'GET', url: '/api/sale' })).statusCode).toBe(503);
