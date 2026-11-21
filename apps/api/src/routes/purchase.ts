@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
 import { PublishRejected } from '@flash-sale/messaging';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync } from 'fastify';
 
 import { admit } from '../admission.js';
 import type { ServerDeps } from '../deps.js';
 import { errorResponse } from '../openapi.js';
 import { findOrder } from '../orders.js';
+import { rateLimit } from '../rate-limit.js';
 
 const purchaseSchema = {
   tags: ['purchase'],
@@ -67,34 +68,18 @@ const purchaseStatusSchema = {
   },
 } as const;
 
-/**
- * `createRateLimit` returns the verdict but does not set response headers the
- * way the route-level plugin does, so they are set from its result. Telling the
- * client when to come back matters: during a flash sale, a client left to guess
- * retries immediately.
- */
-function tooManyRequests(
-  reply: FastifyReply,
-  limit: { max: number; remaining: number; ttlInSeconds: number },
-) {
-  return reply
-    .code(429)
-    .header('retry-after', String(limit.ttlInSeconds))
-    .header('x-ratelimit-limit', String(limit.max))
-    .header('x-ratelimit-remaining', String(limit.remaining))
-    .header('x-ratelimit-reset', String(limit.ttlInSeconds))
-    .send({ error: 'rate_limited' });
-}
-
 export const purchaseRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) => {
-  // `@fastify/rate-limit` is registered on the parent instance; its decorator
-  // is inherited here. Limiting lives with the only route that needs it.
-  const limits = { max: deps.rateLimitPerMinute, timeWindow: 60_000 };
-  const byIp = app.createRateLimit(limits);
-  const byUser = app.createRateLimit({
-    ...limits,
-    keyGenerator: (request) => (request.body as { userId?: string } | undefined)?.userId ?? 'anon',
-  });
+  // IP first, then the user: the hook stops at the first exceeded limit, so an
+  // IP-level flood does not also burn the quota of whichever identifier it
+  // happens to be carrying.
+  const limited = rateLimit(app, [
+    { max: deps.rateLimitPerMinute },
+    {
+      max: deps.rateLimitPerMinute,
+      keyGenerator: (request) =>
+        (request.body as { userId?: string } | undefined)?.userId ?? 'anon',
+    },
+  ]);
 
   app.get<{ Params: { userId: string } }>(
     '/api/purchase/:userId',
@@ -109,25 +94,9 @@ export const purchaseRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) 
 
   app.post<{ Body: { userId: string } }>(
     '/api/purchase',
-    { schema: purchaseSchema },
+    { schema: purchaseSchema, preHandler: limited },
     async (request, reply) => {
       const { userId } = request.body;
-
-      // IP first, and only then the user: an IP-level flood should not also
-      // burn the quota of whichever identifier it happens to be carrying.
-      //
-      // `isExceeded` is the verdict, not `isAllowed`. The latter reads like the
-      // answer but is false even for a request well inside the limit — measured
-      // at max=2, calls 1 and 2 both report isAllowed=false with isExceeded=false.
-      const ipLimit = await byIp(request);
-      if (!ipLimit.isAllowed && ipLimit.isExceeded) {
-        return tooManyRequests(reply, ipLimit);
-      }
-
-      const userLimit = await byUser(request);
-      if (!userLimit.isAllowed && userLimit.isExceeded) {
-        return tooManyRequests(reply, userLimit);
-      }
 
       // Free, in-process rejection of everything already doomed (§6).
       const decision = admit(deps.saleCache);
