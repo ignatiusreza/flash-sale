@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
+import rateLimit from '@fastify/rate-limit';
 import { PublishRejected, publishAttempt } from '@flash-sale/messaging';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import type pg from 'pg';
 
 import { admit } from './admission.js';
 import { findOrder } from './orders.js';
-import { TokenBucket } from './rate-limit.js';
 import type { SaleCache } from './sale-cache.js';
 
 export interface ServerDeps {
@@ -28,7 +28,7 @@ const purchaseBody = {
   },
 } as const;
 
-export function buildServer(deps: ServerDeps): FastifyInstance {
+export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   const app = Fastify({
     logger: deps.logger ?? false,
     // Fastify's ajv strips unknown properties by default, which makes
@@ -36,17 +36,35 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     // an unexpected field is more likely a client bug than noise worth ignoring.
     ajv: { customOptions: { removeAdditional: false } },
   });
-  const ipLimiter = TokenBucket.perMinute(deps.rateLimitPerMinute);
-  const userLimiter = TokenBucket.perMinute(deps.rateLimitPerMinute);
 
-  const idle = setInterval(() => {
-    ipLimiter.evictIdle();
-    userLimiter.evictIdle();
-  }, 60_000);
-  idle.unref();
-  app.addHook('onClose', () => {
-    clearInterval(idle);
+  // `global: false`: only the purchase endpoint is limited. `/api/sale` is
+  // polled by every open tab by design, and limiting health checks would make
+  // a busy instance look unhealthy.
+  await app.register(rateLimit, { global: false });
+
+  const limits = { max: deps.rateLimitPerMinute, timeWindow: 60_000 };
+  const byIp = app.createRateLimit(limits);
+  const byUser = app.createRateLimit({
+    ...limits,
+    keyGenerator: (request) => (request.body as { userId?: string } | undefined)?.userId ?? 'anon',
   });
+
+  // `createRateLimit` returns the verdict but does not set response headers the
+  // way the route-level plugin does, so they are set from its result here.
+  // Telling the client when to come back matters: during a flash sale, a client
+  // left to guess retries immediately.
+  function tooManyRequests(
+    reply: FastifyReply,
+    limit: { max: number; remaining: number; ttlInSeconds: number },
+  ) {
+    return reply
+      .code(429)
+      .header('retry-after', String(limit.ttlInSeconds))
+      .header('x-ratelimit-limit', String(limit.max))
+      .header('x-ratelimit-remaining', String(limit.remaining))
+      .header('x-ratelimit-reset', String(limit.ttlInSeconds))
+      .send({ error: 'rate_limited' });
+  }
 
   app.get('/healthz', () => ({ status: 'ok' }));
 
@@ -82,8 +100,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     async (request, reply) => {
       const { userId } = request.body;
 
-      if (!ipLimiter.take(request.ip) || !userLimiter.take(userId)) {
-        return reply.code(429).send({ error: 'rate_limited' });
+      // IP first, and only then the user: an IP-level flood should not also
+      // burn the quota of whichever identifier it happens to be carrying.
+      //
+      // `isExceeded` is the verdict, not `isAllowed`. The latter reads like the
+      // answer but is false even for a request well inside the limit — measured
+      // at max=2, calls 1 and 2 both report isAllowed=false with isExceeded=false.
+      const ipLimit = await byIp(request);
+      if (!ipLimit.isAllowed && ipLimit.isExceeded) {
+        return tooManyRequests(reply, ipLimit);
+      }
+
+      const userLimit = await byUser(request);
+      if (!userLimit.isAllowed && userLimit.isExceeded) {
+        return tooManyRequests(reply, userLimit);
       }
 
       // Free, in-process rejection of everything already doomed (§6).

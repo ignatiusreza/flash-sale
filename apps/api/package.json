@@ -8,6 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@fastify/rate-limit": "^11.2.2",
     "@flash-sale/core": "workspace:*",
     "@flash-sale/messaging": "workspace:*",
     "@prometheus-io/client": "^0.16.1",

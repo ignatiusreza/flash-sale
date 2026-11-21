@@ -280,7 +280,7 @@ Deliberately **not** filtered at the API layer: "already purchased". It needs a 
 
 Rate limiting still applies on top: a per-IP and per-user token bucket, rejecting with `429`. Not in the brief, but an endpoint this attractive without a limiter is a conspicuous omission.
 
-The bucket is held **in process, not shared**, so the effective limit across N instances is N times the configured one. That is a real weakening and it is stated rather than hidden: a shared counter would need a store on the path of every request, and this design deliberately has none. The limiter exists to blunt a single abusive client; the bounded queue (§5) and the claim (§4) are what actually protect the sale, and neither depends on it.
+The limiter is `@fastify/rate-limit`, whose default store is **in process, not shared**, so the effective limit across N instances is N times the configured one. That is a real weakening and it is stated rather than hidden: a shared counter would need a store on the path of every request, and this design deliberately has none. The limiter exists to blunt a single abusive client; the bounded queue (§5) and the claim (§4) are what actually protect the sale, and neither depends on it.
 
 ## 7. API surface
 

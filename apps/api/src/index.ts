@@ -19,7 +19,7 @@ async function main(): Promise<void> {
   const channel = await connection.createConfirmChannel();
   const { queue } = await assertTopology(channel);
 
-  const app = buildServer({
+  const app = await buildServer({
     pool,
     saleCache,
     saleId: config.SALE_ID,
