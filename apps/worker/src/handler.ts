@@ -34,18 +34,26 @@ export async function handleBatch(
       ? await findExistingOrders(db, saleId, ungranted)
       : new Map<string, string>();
 
-  const closedStatus = saleStatusAt({ startAt: claim.startAt, endAt: claim.endAt }, new Date());
+  const windowStatus = saleStatusAt({ startAt: claim.startAt, endAt: claim.endAt }, new Date());
 
+  // One branch per outcome, in the order they are reached: won, already held,
+  // lost on stock, too early, too late. Five branches for the five values of
+  // PurchaseOutcome, so a new one cannot be added without a home here.
   const results: PurchaseResultEvent[] = attempts.map(({ attemptId, userId }) => {
-    const orderId = granted.get(userId) ?? existing.get(userId);
-    if (orderId) {
-      const status = granted.has(userId) ? 'confirmed' : 'already_purchased';
-      return { attemptId, userId, status, orderId };
+    const grantedOrderId = granted.get(userId);
+    const existingOrderId = existing.get(userId);
+
+    if (grantedOrderId) {
+      return { attemptId, userId, status: 'confirmed', orderId: grantedOrderId };
+    } else if (existingOrderId) {
+      return { attemptId, userId, status: 'already_purchased', orderId: existingOrderId };
+    } else if (claim.open) {
+      return { attemptId, userId, status: 'sold_out' };
+    } else if (windowStatus === 'upcoming') {
+      return { attemptId, userId, status: 'not_started' };
+    } else {
+      return { attemptId, userId, status: 'ended' };
     }
-    if (!claim.open) {
-      return { attemptId, userId, status: closedStatus === 'upcoming' ? 'not_started' : 'ended' };
-    }
-    return { attemptId, userId, status: 'sold_out' };
   });
 
   return { saleId, results };
