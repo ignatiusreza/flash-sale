@@ -1,8 +1,15 @@
-import { assertTopology, publishAttempt } from '@flash-sale/messaging';
+import {
+  assertTopology,
+  publishAttempt,
+  publishPresence,
+  subscribeToEvents,
+  type PurchaseResultsMessage,
+} from '@flash-sale/messaging';
 import amqp from 'amqplib';
 import pg from 'pg';
 
 import { loadConfig } from './config.js';
+import { createGateway } from './realtime/gateway.js';
 import { SaleCache } from './sale/cache.js';
 import { buildServer } from './server.js';
 
@@ -23,7 +30,7 @@ async function main(): Promise<void> {
 
   const connection = await amqp.connect(config.RABBITMQ_URL);
   const channel = await connection.createConfirmChannel();
-  const { queue } = await assertTopology(channel);
+  const { queue, exchange } = await assertTopology(channel);
 
   const app = await buildServer({
     pool,
@@ -34,10 +41,38 @@ async function main(): Promise<void> {
     logger: true,
   });
 
+  // Listen before attaching the gateway: Socket.IO needs the underlying server,
+  // and Fastify only creates it once it is listening.
   await app.listen({ port: config.PORT, host: config.HOST });
+
+  const gateway = createGateway({
+    httpServer: app.server,
+    saleCache,
+    announcePresence: (connections, instanceId) =>
+      publishPresence(channel, exchange, {
+        instanceId,
+        connections,
+        at: new Date().toISOString(),
+      }),
+  });
+
+  // Every instance receives every event; each delivers only to the sockets it
+  // holds, so no shared adapter or user-to-instance registry is needed (§8).
+  const subscription = await subscribeToEvents(channel, exchange, {
+    onResults: (message) => gateway.handleResults(message as PurchaseResultsMessage),
+    onPresence: (message) => {
+      if (message.instanceId !== gateway.instanceId) {
+        gateway.handlePresence(message.instanceId, message.connections);
+      }
+    },
+  });
+
+  app.log.info(`realtime gateway ready as ${gateway.instanceId}`);
 
   const shutdown = async () => {
     saleCache.stop();
+    await subscription.stop();
+    await gateway.close();
     await app.close();
     await channel.close();
     await connection.close();

@@ -25,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "@types/pg": "^8.23.1"
+    "@types/pg": "^8.23.1",
+    "socket.io-client": "^4.8.4"
   }
 }

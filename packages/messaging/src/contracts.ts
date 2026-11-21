@@ -50,3 +50,21 @@ export interface PurchaseResultsMessage {
   readonly saleId: string;
   readonly results: readonly import('@flash-sale/core').PurchaseResultEvent[];
 }
+
+export const ROUTING_KEY_PRESENCE = 'presence.count';
+
+/**
+ * How many sockets one API instance currently holds.
+ *
+ * Presence is aggregated rather than exact: each instance announces its own
+ * count on a timer, and every instance sums what it has heard. Exact
+ * per-connection accounting broadcast to everyone would be O(N²), and the
+ * number is decorative — "X people are looking at this" does not need to be
+ * right to the person.
+ */
+export interface PresenceMessage {
+  readonly instanceId: string;
+  readonly connections: number;
+  /** ISO 8601, UTC. Lets receivers expire instances that stopped announcing. */
+  readonly at: string;
+}

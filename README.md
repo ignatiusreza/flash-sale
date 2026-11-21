@@ -4,7 +4,7 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 3 of 8.** The claim, the queue around it and the HTTP API are implemented and tested; the WebSocket layer and frontend land in phases 4–5. See `docs/PLAN.md` §13.
+> **Status: phase 4 of 8.** The claim, the queue, the HTTP API and the realtime layer are implemented and tested; the frontend lands in phase 5. See `docs/PLAN.md` §13.
 
 ## API
 
@@ -17,7 +17,7 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 Interactive docs are served at **`/docs`**, with the OpenAPI document at `/docs/json`. The route schemas generate it, and Fastify compiles the same schemas for validation and response serialization — so documenting the API also makes it marginally faster.
 
-`POST /api/purchase` answers **202, not 200**: the outcome arrives over the socket in phase 4. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
+`POST /api/purchase` answers **202, not 200**: the outcome arrives over the socket. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
 
 ## The claim
 
@@ -136,6 +136,22 @@ Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks
 | `pnpm lint` / `pnpm format` | ESLint / Prettier.                                          |
 | `pnpm licenses:check`       | Fails on any dependency licence outside the allowlist.      |
 | `pnpm clean`                | Removes build output.                                       |
+
+## Realtime
+
+Clients connect a Socket.IO socket identifying themselves with a `userId`, and receive:
+
+| Event | When |
+| --- | --- |
+| `purchase:result` | their attempt is settled — `confirmed`, `already_purchased`, `sold_out`, `not_started` or `ended` |
+| `sale:status` | on connect, and whenever status or availability changes |
+| `sale:viewers` | periodically, with the aggregated viewer count |
+
+**Every API instance receives every result** from the RabbitMQ fanout and delivers only to the sockets it holds. That is deliberate: a result targets exactly one user, so no shared adapter and no user-to-instance registry is needed — the cost of the extra fan-out is bounded by the request rate (`docs/PLAN.md` §8).
+
+**The viewer count is aggregated, not exact.** Each instance announces its own socket count on a timer and every instance sums what it has heard, expiring instances that go quiet. It converges within an announcement interval rather than being instantaneous, which is the right trade for a decorative number — exact accounting broadcast to everyone would be O(N²).
+
+A socket that does not identify itself is refused during the handshake: nothing could ever be routed to it.
 
 ## Conventions
 
