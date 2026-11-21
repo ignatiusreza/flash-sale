@@ -68,6 +68,26 @@ function reachable(host, port, timeoutMs = 2000) {
 }
 
 async function resolveServices() {
+  // Inside the devcontainer the services are already addressed by name and
+  // there is no docker CLI to ask, so an environment that says where they are
+  // wins over discovery. This is also the escape hatch for pointing the dev
+  // stack at something that is not Compose at all.
+  if (process.env.DATABASE_URL && process.env.RABBITMQ_URL) {
+    const pg = new URL(process.env.DATABASE_URL);
+    const mq = new URL(process.env.RABBITMQ_URL);
+    const [pgUp, mqUp] = await Promise.all([
+      reachable(pg.hostname, Number(pg.port || 5432)),
+      reachable(mq.hostname, Number(mq.port || 5672)),
+    ]);
+    if (!pgUp || !mqUp) {
+      say('dev', `cannot reach ${pg.hostname}:${pg.port} or ${mq.hostname}:${mq.port}`);
+      say('dev', 'DATABASE_URL and RABBITMQ_URL are set — are those services running?');
+      process.exit(1);
+    }
+    say('dev', `using DATABASE_URL (${pg.hostname}) and RABBITMQ_URL (${mq.hostname})`);
+    return { DATABASE_URL: process.env.DATABASE_URL, RABBITMQ_URL: process.env.RABBITMQ_URL };
+  }
+
   const [pgPort, mqPort] = await Promise.all([
     composePort('postgres', 5432),
     composePort('rabbitmq', 5672),

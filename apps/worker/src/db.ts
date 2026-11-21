@@ -11,6 +11,10 @@ export function createPool(connectionString: string, max = 10): pg.Pool {
     connectionString,
     max,
     options: '-c timezone=UTC',
+    // Without this, an unreachable host does not fail — it hangs until the
+    // kernel gives up on the TCP connect, which can be minutes. A process that
+    // cannot reach its database should say so immediately, not look wedged.
+    connectionTimeoutMillis: 5_000,
   });
 }
 

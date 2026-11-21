@@ -10,7 +10,13 @@ async function main(): Promise<void> {
   const config = loadConfig();
 
   // Session timezone pinned on the connection, not inherited (docs/PLAN.md §9.1).
-  const pool = new pg.Pool({ connectionString: config.DATABASE_URL, options: '-c timezone=UTC' });
+  // The connect timeout matters as much: without it an unreachable database
+  // hangs rather than erroring, and the process just looks wedged.
+  const pool = new pg.Pool({
+    connectionString: config.DATABASE_URL,
+    options: '-c timezone=UTC',
+    connectionTimeoutMillis: 5_000,
+  });
 
   const saleCache = new SaleCache(pool, config.SALE_ID, config.SALE_REFRESH_MS);
   await saleCache.start();
