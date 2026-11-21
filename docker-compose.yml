@@ -76,6 +76,52 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # The application itself, behind a profile so it does not start by default.
+  #
+  # `pnpm dev` runs the API, worker and web dev server on the host; if these
+  # started automatically the two would fight over the same ports. Start them
+  # explicitly to see the built app:
+  #   docker compose --profile app up -d --wait
+  #
+  # The API serves the HTTP API, the WebSocket and the built SPA on one origin,
+  # so it is the only service publishing a port a person opens.
+  api:
+    profiles: ['app']
+    build:
+      context: .
+      target: api
+    environment:
+      TZ: UTC
+      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432/flashsale
+      RABBITMQ_URL: amqp://flashsale:flashsale@rabbitmq:5672
+      HOST: 0.0.0.0
+      PORT: 3000
+      # Nothing sits in front of it here, so X-Forwarded-For is whatever the
+      # client chose to send and must not be believed (docs/PLAN.md §6).
+      TRUST_PROXY: '0'
+    ports:
+      - '${APP_PORT:-8080}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    profiles: ['app']
+    build:
+      context: .
+      target: worker
+    environment:
+      TZ: UTC
+      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432/flashsale
+      RABBITMQ_URL: amqp://flashsale:flashsale@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
 volumes:
   postgres-data:
   rabbitmq-data:
