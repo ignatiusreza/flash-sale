@@ -93,6 +93,25 @@ Both editors read the same `.devcontainer/devcontainer.json`, which builds on th
 
 Inside the container the services are reachable by name — `postgres:5432`, `rabbitmq:5672` — already wired up as `DATABASE_URL` and `RABBITMQ_URL`. Host port clashes cannot affect that, because nothing inside goes through the host mapping. The API and web ports are published by Compose rather than left to editor-specific forwarding, so they behave the same in either editor and with no editor at all.
 
+#### If the container will not start
+
+`Bind for 0.0.0.0:3000 failed: port is already allocated` almost always means another copy of this project still has a container running — editors leave the Compose stack up when the window closes, so a session you finished hours ago can still hold the port. Find it and stop it:
+
+```sh
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep 3000
+docker stop <name>                      # reversible; volumes are untouched
+```
+
+Only one checkout can hold 3000 and 5173 at a time. To run two side by side — a worktree alongside the main checkout — give one of them its own ports in a `.env`:
+
+```sh
+API_PORT=3100
+WEB_PORT=5174
+POSTGRES_PORT=15442
+RABBITMQ_PORT=15683
+RABBITMQ_UI_PORT=15684
+```
+
 Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks.json` for Zed, `customizations.vscode` inside `devcontainer.json` for VS Code. Both set the same thing — Prettier owns formatting, ESLint fixes on save — so the gates behave identically whichever you use.
 
 ## Layout
