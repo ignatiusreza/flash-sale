@@ -18,6 +18,8 @@ const purchaseSchema = {
   body: {
     type: 'object',
     required: ['userId'],
+    // Rejects rather than silently drops, but only because `server.ts` turns
+    // off ajv's `removeAdditional` — that cannot be set per route.
     additionalProperties: false,
     properties: {
       userId: { type: 'string', minLength: 1, maxLength: 128 },

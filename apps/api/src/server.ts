@@ -21,9 +21,11 @@ export type { ServerDeps } from './deps.js';
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   const app = Fastify({
     logger: deps.logger ?? false,
-    // Fastify's ajv strips unknown properties by default, which makes
-    // `additionalProperties: false` silently permissive. On a purchase endpoint
-    // an unexpected field is more likely a client bug than noise worth ignoring.
+    // Fastify's ajv strips unknown properties by default, which would make
+    // every `additionalProperties: false` in `routes/` silently permissive —
+    // the field is dropped and the request succeeds. This is instance-wide and
+    // cannot be set per route, so it lives here even though what it protects
+    // is a schema elsewhere. `routes/purchase.test.ts` fails without it.
     ajv: { customOptions: { removeAdditional: false } },
   });
 
