@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import type { ServerDeps } from './deps.js';
 import { openApiDocument } from './http/openapi.js';
+import { spa } from './http/spa.js';
 import { healthRoutes } from './routes/health.js';
 import { purchaseRoutes } from './routes/purchase.js';
 import { saleRoutes } from './routes/sale.js';
@@ -21,6 +22,12 @@ export type { ServerDeps } from './deps.js';
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   const app = Fastify({
     logger: deps.logger ?? false,
+    // Decides whether `request.ip` — which is what the rate limiter keys on —
+    // comes from the socket or from `X-Forwarded-For`. Wrong in either
+    // direction and the limit silently stops working: left off behind a proxy
+    // every request shares one bucket, turned on without one each request can
+    // forge a fresh one.
+    trustProxy: deps.trustProxy ?? false,
     // Fastify's ajv strips unknown properties by default, which would make
     // every `additionalProperties: false` in `routes/` silently permissive —
     // the field is dropped and the request succeeds. This is instance-wide and
@@ -44,6 +51,10 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   await app.register(healthRoutes, deps);
   await app.register(saleRoutes, deps);
   await app.register(purchaseRoutes, deps);
+
+  // Last: its not-found handler is the SPA fallback, so every real route must
+  // already be registered for it to know what is genuinely missing.
+  if (deps.webRoot) await spa(app, deps.webRoot);
 
   return app;
 }

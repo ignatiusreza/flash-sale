@@ -433,20 +433,44 @@ docker-compose.yml   README.md
 
 pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. ESLint flat config with `typescript-eslint` for correctness, Prettier for formatting and nothing else, `tsc --noEmit` under `strict`, `pnpm audit --audit-level=high`, and a licence allowlist check — all five gating CI rather than advisory, per [`CLAUDE.md`](../CLAUDE.md). Every runtime dependency named above is MIT or Apache-2.0, so the allowlist costs nothing to satisfy; it exists to catch what arrives transitively. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
 
-### 12.1 Serving the frontend — open, and owed a decision in phase 5
+### 12.1 Serving the frontend — decided in phase 5, revised on review: the API serves it
 
-Today the Vite dev server proxies `/api` and `/socket.io` to the API, which works for development and **quietly leaves production unanswered**: `vite build` produces `apps/web/dist` and nothing serves it. There is no `web` target in the Dockerfile.
+`vite build` produces `apps/web/dist` and something has to serve it. The first attempt added an nginx service that served the SPA and reverse-proxied `/api` and `/socket.io` to the API. Review killed it, correctly, and the reasons generalise beyond this repo.
 
-[`@fastify/vite`](https://vite.fastify.dev/) closes both ends in about eight lines — Vite as middleware in development, the built bundle in production — and would drop a process and the proxy block from `pnpm dev`. It is the obvious answer for development and is adopted in phase 5.
+**Decision: the API serves the built SPA from `WEB_ROOT`, and routing to it is left to whatever is already in front.** One image, one process, one origin.
 
-Production is the part that needs deciding rather than defaulting:
+The nginx version embedded `proxy_pass http://api:3000` in an image. That is a *deployment topology* compiled into a build artefact, and it fails in every environment that is not the Compose file it was written for:
 
-- **Served by the API.** Simplest, one artefact, one command. But every horizontally-scaled replica then also serves static files, on precisely the process this design exists to keep responsive under load — and the `api` image has to carry `apps/web/dist`, coupling two builds that are otherwise independent.
-- **Served by a CDN or static host.** What a real flash sale does. Assets are immutable and cacheable, the API tier stays dedicated to the API, and the two deploy separately. It costs a second deployment target that the brief explicitly does not require.
+- **Outside Compose** — API and worker against a Postgres and RabbitMQ already on the host — the upstream name does not resolve, so the image is useless exactly when someone wants to run the app the simplest way.
+- **Under Kubernetes** the proxying is redundant. An Ingress or an HTTPRoute already expresses "`/api` to this Service, `/` to that one", declaratively, in the chart. Shipping nginx too means two layers of routing, a second Deployment to run and scale, an extra hop on every request, and path rules that can only be changed by rebuilding an image. The upstream would also have to be templated per release, since the Service is `{{ .Release.Name }}-api`.
 
-The decision is deferred rather than dodged: it changes what goes into the `api` image, so it is worth making once the frontend exists rather than guessing now against a placeholder page.
+Serving the SPA from the API costs little. The assets are hashed and immutable, so each client fetches them once; and for a flash sale they are fetched while the countdown runs, not at `T=0` when the buy spike lands. The two are not contemporaneous, which is what the "don't put static files on the hot path" instinct is really about.
 
-Two infrastructure components, not three — dropping Redis is a direct consequence of the queue owning the decision, and it is worth calling out in the README as a simplification rather than leaving it unremarked.
+What remains true from the original argument is that assets should not be served from an origin at scale — but the answer to that is a CDN, not a second container. `WEB_ROOT` is therefore optional: leave it unset and the process is a pure API, with `/` routed to a bucket or CDN by the gateway. The same image covers both, and nothing about the application changes.
+
+This is not `@fastify/vite`, which was also considered and rejected. That plugin couples Vite into the server for SSR and dev middleware; what is needed here is `@fastify/static` pointed at a directory, in production only. Development keeps the Vite dev server and its proxy, which already worked.
+
+Two details the fallback must get right, both quiet when wrong:
+
+- The static plugin is registered with `wildcard: false` and the SPA fallback lives in `setNotFoundHandler`. A wildcard route would answer unknown `/api` paths with the HTML shell, so a mistyped endpoint returns `200` and the client fails later, parsing HTML as JSON.
+- Only navigations get the shell — `GET`/`HEAD` with `Accept: text/html`, outside the server's own prefixes. Everything else keeps the API's JSON `404`.
+
+#### Trusting `X-Forwarded-For`
+
+Removing nginx exposed a bug it had been hiding. The nginx config set `X-Forwarded-For` and a comment claimed this kept the per-IP rate limiter (§6) from collapsing into one bucket. It did not: Fastify's `trustProxy` defaults to `false`, so `request.ip` stayed the socket peer — nginx — and *every* request shared one bucket. Setting the header without trusting it does nothing. Measured: with `trustProxy` off, three requests from three forwarded addresses against `max: 2` return `200, 200, 429`; with it on, `200, 200, 200`.
+
+So trust is now explicit, in `TRUST_PROXY`, and defaults to off:
+
+- **off** — `request.ip` is the socket peer. Correct when the process is reachable directly, as it is under Compose.
+- **a list of addresses or CIDRs** — the safe production setting behind a gateway.
+- **`true`** — trusts the whole chain, which means the client chooses its own `request.ip` and can mint a fresh rate-limit bucket per request. Only acceptable where nothing but the gateway can reach the process *and* the gateway overwrites the header rather than appending to it.
+- **a hop count is rejected at boot.** Fastify maps a numeric `trustProxy` to a function that trusts nothing, deliberately, because a hop count cannot validate the immediate peer. Accepting one would read as configured while trusting nobody, so the config refuses it with a message saying what to use instead.
+
+#### What a Helm chart would look like
+
+Nothing here needs to change for it. Two Deployments, `api` and `worker`, from the two images; a Service for `api`; an HTTPRoute (or Ingress) sending `/` to it. `TRUST_PROXY` is set to the gateway's CIDR, which is what makes per-IP limiting work behind it. Moving the SPA to a CDN later means unsetting `WEB_ROOT` and adding a route — no rebuild, no code change.
+
+The remaining caveats are unchanged and documented elsewhere: rate limits are per instance (§6), so N replicas allow N times the configured limit, and presence is eventually consistent across instances (§8).
 
 ## 13. Implementation phases
 
