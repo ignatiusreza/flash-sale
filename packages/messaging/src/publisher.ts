@@ -1,4 +1,4 @@
-import type { PurchaseAttempt, PurchaseResultsMessage } from '@flash-sale/core';
+import type { PurchaseAttempt, PurchaseResultsMessage } from './contracts.js';
 import type { ConfirmChannel } from 'amqplib';
 
 /** Raised when the broker refuses a publish — queue full, or nacked. */

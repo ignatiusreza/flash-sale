@@ -1,12 +1,6 @@
-import {
-  ATTEMPTS_QUEUE,
-  ATTEMPTS_QUEUE_ARGS,
-  EVENTS_EXCHANGE,
-  ROUTING_KEY_RESULTS,
-} from '@flash-sale/core';
 import type { Channel } from 'amqplib';
 
-export { ATTEMPTS_QUEUE, EVENTS_EXCHANGE, ROUTING_KEY_RESULTS };
+import { ATTEMPTS_QUEUE, ATTEMPTS_QUEUE_ARGS, EVENTS_EXCHANGE } from './contracts.js';
 
 /**
  * Declares everything both sides depend on. Idempotent, so every process can

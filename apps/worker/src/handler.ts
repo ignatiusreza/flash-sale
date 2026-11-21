@@ -1,9 +1,5 @@
-import {
-  saleStatusAt,
-  type PurchaseAttempt,
-  type PurchaseResultEvent,
-  type PurchaseResultsMessage,
-} from '@flash-sale/core';
+import { saleStatusAt, type PurchaseResultEvent } from '@flash-sale/core';
+import type { PurchaseAttempt, PurchaseResultsMessage } from '@flash-sale/messaging';
 
 import { claimBatch, findExistingOrders } from './claim.js';
 import type { Queryable } from './db.js';

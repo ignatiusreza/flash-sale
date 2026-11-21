@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import type { PurchaseAttempt, PurchaseResultsMessage } from '@flash-sale/core';
 import {
   assertTopology,
   publishAttempt,
   PublishRejected,
   startBatchConsumer,
+  type PurchaseAttempt,
+  type PurchaseResultsMessage,
 } from '@flash-sale/messaging';
 import amqp, { type ChannelModel, type ConfirmChannel } from 'amqplib';
 import type pg from 'pg';

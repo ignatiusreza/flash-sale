@@ -1,4 +1,4 @@
-import type { PurchaseAttempt } from '@flash-sale/core';
+import type { PurchaseAttempt } from './contracts.js';
 import type { Channel, ConsumeMessage } from 'amqplib';
 
 export interface BatchConsumerOptions {
