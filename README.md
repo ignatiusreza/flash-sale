@@ -41,6 +41,21 @@ The first asserts on grants *returned to callers* as well as rows in the table. 
 ```sh
 pnpm install
 docker compose up -d --wait   # Postgres + RabbitMQ
+pnpm dev                      # everything else
+```
+
+`pnpm dev` is the whole stack: it discovers the service ports from Compose, builds once, applies migrations, seeds a sale if none exists, then runs the TypeScript watcher, the API, the worker and the web dev server with labelled output. Ctrl-C stops all of them.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `PORT` | `3000` | API port |
+| `SEED_STOCK` | `100` | units in the seeded sale |
+| `SEED_DURATION_MINUTES` | `60` | how long it stays open |
+| `SEED_RESET` | — | `1` to recreate the sale and drop its orders |
+
+Seeding is idempotent, so restarting never resets stock out from under whatever you were testing.
+
+```sh
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```
 
