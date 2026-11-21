@@ -133,6 +133,71 @@ describe('realtime gateway', () => {
     await vi.waitFor(() => expect(gateway.registry.connections).toBe(1));
   });
 
+  describe('the same user in several tabs', () => {
+    it('delivers a result to every tab, including ones that did not ask', async () => {
+      // Delivery is keyed on the user, not the attempt. A tab that never
+      // clicked Buy still learns its user now holds an order, which is what
+      // stops it showing a stale "not purchased" state.
+      const tabs = await Promise.all([client('alice'), client('alice'), client('alice')]);
+      await Promise.all(tabs.map((tab) => once(tab, 'sale:status')));
+
+      const delivered = Promise.all(tabs.map((tab) => once(tab, 'purchase:result')));
+      gateway.handleResults({
+        saleId: 'flash',
+        results: [{ attemptId: 'a1', userId: 'alice', status: 'confirmed', orderId: 'order-1' }],
+      });
+
+      for (const result of await delivered) {
+        expect(result).toMatchObject({ attemptId: 'a1', orderId: 'order-1' });
+      }
+    });
+
+    it('sends every tab both outcomes when two tabs each attempt', async () => {
+      // Two tabs, two attempts, one order. Each tab sees the other's outcome
+      // too, so a client keying on the newest event could flip from
+      // `confirmed` to `already_purchased`. Both carry the same orderId, which
+      // is why a client should key on that rather than on which attempt won.
+      const [tab1, tab2] = await Promise.all([client('alice'), client('alice')]);
+      await Promise.all([once(tab1!, 'sale:status'), once(tab2!, 'sale:status')]);
+
+      const seen: Record<string, unknown[]> = { tab1: [], tab2: [] };
+      tab1!.on('purchase:result', (p) => seen['tab1']!.push(p));
+      tab2!.on('purchase:result', (p) => seen['tab2']!.push(p));
+
+      gateway.handleResults({
+        saleId: 'flash',
+        results: [{ attemptId: 'a1', userId: 'alice', status: 'confirmed', orderId: 'order-1' }],
+      });
+      gateway.handleResults({
+        saleId: 'flash',
+        results: [
+          { attemptId: 'a2', userId: 'alice', status: 'already_purchased', orderId: 'order-1' },
+        ],
+      });
+
+      await vi.waitFor(() => {
+        expect(seen['tab1']).toHaveLength(2);
+        expect(seen['tab2']).toHaveLength(2);
+      });
+
+      for (const events of Object.values(seen)) {
+        expect(events.map((e) => (e as { orderId: string }).orderId)).toEqual([
+          'order-1',
+          'order-1',
+        ]);
+      }
+    });
+
+    it('counts a user once however many tabs they have', async () => {
+      const tabs = await Promise.all([client('alice'), client('alice'), client('bob')]);
+      await Promise.all(tabs.map((tab) => once(tab, 'sale:status')));
+
+      // Three sockets, two people.
+      expect(gateway.registry.connections).toBe(3);
+      expect(gateway.presence.total()).toBe(2);
+    });
+  });
+
   it('includes other instances in the viewer count', async () => {
     const alice = await client('alice');
     await once(alice, 'sale:status');

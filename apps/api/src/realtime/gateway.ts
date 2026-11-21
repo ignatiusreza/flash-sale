@@ -73,8 +73,8 @@ export function createGateway(options: GatewayOptions): Gateway {
 
     // Refresh our own entry before reading the total rather than adding to it:
     // once the timer has recorded this instance, `total()` already includes it,
-    // and adding `registry.connections` would count this instance twice.
-    presence.record(instanceId, registry.connections);
+    // and adding our own count again would double this instance.
+    presence.record(instanceId, registry.users);
     socket.emit('sale:viewers', { count: presence.total() });
   });
 
@@ -102,7 +102,13 @@ export function createGateway(options: GatewayOptions): Gateway {
 
   // Announce this instance's count, and tell our own sockets the total.
   const presenceTimer = setInterval(() => {
-    const own = registry.connections;
+    // Distinct users, not sockets: "X people are looking at this" should not
+    // triple because one person has three tabs open. This only dedupes within
+    // an instance — the same user connected to two instances still counts
+    // twice, and closing that would need the shared registry this design
+    // deliberately avoids. Over-counting a decorative number slightly is the
+    // cheaper mistake.
+    const own = registry.users;
     options.announcePresence?.(own, instanceId);
     presence.record(instanceId, own);
     registry.broadcast('sale:viewers', { count: presence.total() });

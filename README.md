@@ -153,6 +153,14 @@ Clients connect a Socket.IO socket identifying themselves with a `userId`, and r
 
 A socket that does not identify itself is refused during the handshake: nothing could ever be routed to it.
 
+### The same user in several tabs
+
+Results are delivered **per user, not per attempt**, so every tab a user has open — on any instance — receives every result for that user, including attempts it did not make itself. That is deliberate: a tab that never clicked Buy still learns its user now holds an order, instead of showing a stale "not purchased".
+
+The consequence a client must handle: if two tabs each attempt, every tab sees both outcomes — one `confirmed` and one `already_purchased` — and a client keying on the newest event would flip between them. **Both carry the same `orderId`**, so a client should key on that rather than on which attempt won. The two statuses mean the same thing to a user: you hold an order.
+
+The viewer count is distinct users rather than sockets, so three tabs are one viewer. That dedupes within an instance only — the same user connected to two instances counts twice, which closing would need the shared registry this design avoids.
+
 ## Conventions
 
 `CLAUDE.md` holds the housekeeping rules — lint and format gate every commit, no copyleft or known-vulnerable dependencies, one PR at a time. They are enforced in CI, not by convention.
