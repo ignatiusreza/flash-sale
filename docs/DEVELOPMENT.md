@@ -70,6 +70,10 @@ There are only two application services, `api` and `worker`. The API serves the 
 
 Seeding is idempotent, so restarting never resets stock out from under whatever you were testing.
 
+Compose runs two workers — one active, one standby that the broker promotes — and restarts the API and workers when they exit, which is how they recover from losing the broker.
+
+Attempts that can never be claimed — malformed, or redelivered past the delivery limit — land in `<queue>.dead` (`development.purchase.attempts.dead` under `pnpm dev`). Nothing consumes it; inspect it in the RabbitMQ UI. When the attempts queue's arguments change between versions, startup replaces the queue if it is empty, and refuses to start while it still holds attempts: stop the previous version's API first, let its worker drain the queue, then start the new one.
+
 ```sh
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```

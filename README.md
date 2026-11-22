@@ -147,13 +147,15 @@ Each is argued at length, with measurements, in `docs/PLAN.md`.
 
 | Failure | What happens |
 | --- | --- |
-| Worker dies mid-batch | The transaction rolls back; the messages were never acked, so they are redelivered to the next consumer. |
+| Worker dies mid-batch | The transaction rolls back; the messages were never acked, so they are redelivered to the standby worker, which the broker promotes. |
 | Worker dies after commit, before ack | The batch is redelivered; the claim inserts nothing for buyers who already hold an order, so it is a no-op. |
 | API instance dies | Its sockets drop; clients reconnect to another instance and re-sync their order from `GET /api/orders`. Queued attempts are unaffected. |
 | A result is lost — socket down, or page refreshed mid-purchase | The page re-syncs after every reconnect; on a refresh it restores the attempt it was waiting on and still recognises the outcome. A result missed while no page was open is settled from the order lookup and the sale's state. |
-| Postgres down | The worker stops acking; the queue fills to its bound, then the API sheds with `503`. No wrong answers. |
+| Postgres down | The worker holds its batch unacked and retries it with backoff; the broker stops delivering, the queue fills to its bound, then the API sheds with `503`. When Postgres returns, every accepted attempt is claimed. Verified: 20 attempts accepted during an outage, all 20 orders once it ended. |
 | Traffic beyond capacity | The queue is bounded; past it the API answers `503` immediately instead of queueing without limit. Measured: every accepted attempt still became an order. |
 | A broker node dies | (Production topology.) The quorum queue elects a new leader within seconds; a confirm means a majority already held the message. |
+| Connection to the broker lost | The API and worker exit and their restart policy brings them back; unacked attempts are redelivered and clients re-sync. Verified by restarting RabbitMQ under the Compose stack. |
+| An attempt that can never be claimed | A malformed message, or one redelivered past the queue's delivery limit of 20 — 20 worker deaths holding it — goes to the `<queue>.dead` queue for an operator, never nowhere. |
 
 The property under all of it: **nobody is told "confirmed" unless the order is committed.** An outage is honest; a false confirmation is not, and the design trades availability for that (PLAN §5).
 
@@ -167,7 +169,7 @@ The property under all of it: **nobody is told "confirmed" unless the order is c
 
 | Layer | What | Run |
 | --- | --- | --- |
-| Unit + integration | 165 tests: the claim against a real Postgres, including the two that matter — **never oversells** (20 000 attempts against 1 000 units yields exactly 1 000 orders to 1 000 buyers) and **never grants one buyer two units** (500 concurrent attempts by one buyer yield one order); queue wiring and redelivery against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
+| Unit + integration | 176 tests: the claim against a real Postgres, including the two that matter — **never oversells** (20 000 attempts against 1 000 units yields exactly 1 000 orders to 1 000 buyers) and **never grants one buyer two units** (500 concurrent attempts by one buyer yield one order); queue wiring and redelivery against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
 | End to end | 16 Playwright specs against the built app | `pnpm test:e2e` |
 | Stress | k6 scenarios, then the invariants checked in Postgres | `pnpm stress <scenario>` |
 

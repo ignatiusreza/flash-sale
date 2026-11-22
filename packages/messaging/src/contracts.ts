@@ -23,12 +23,21 @@ export const ROUTING_KEY_RESULTS = 'purchase.results';
  * single-active-consumer because the serialization the whole design rests on is
  * one consumer processing in order; bounded length so saturation becomes a
  * clean 503 rather than unbounded memory and latency.
+ *
+ * The delivery limit is RabbitMQ 4's default, made explicit because what
+ * happens past it is not: without a dead-letter target the broker drops the
+ * message. Accepted attempts must never vanish, so they are dead-lettered,
+ * at-least-once, to a queue of their own (see `assertTopology`). A delivery is
+ * only spent when a worker dies holding a batch; a failing claim is retried in
+ * place (see `startBatchConsumer`).
  */
 export const ATTEMPTS_QUEUE_ARGS = {
   'x-queue-type': 'quorum',
   'x-single-active-consumer': true,
   'x-max-length': 100_000,
   'x-overflow': 'reject-publish',
+  'x-delivery-limit': 20,
+  'x-dead-letter-strategy': 'at-least-once',
 } as const;
 
 /** Published by the API, consumed by the worker. The browser never sees one. */

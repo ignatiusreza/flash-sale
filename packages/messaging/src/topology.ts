@@ -1,4 +1,4 @@
-import type { Channel } from 'amqplib';
+import type { Channel, ChannelModel } from 'amqplib';
 
 import { ATTEMPTS_QUEUE, ATTEMPTS_QUEUE_ARGS, EVENTS_EXCHANGE } from './contracts.js';
 
@@ -39,20 +39,87 @@ export function topologyNames(environment?: string): { queue: string; exchange: 
 export async function assertTopology(
   channel: Channel,
   options: { environment?: string; queue?: string; exchange?: string; maxLength?: number } = {},
-): Promise<{ queue: string; exchange: string }> {
+): Promise<{ queue: string; exchange: string; deadLetterQueue: string }> {
   const names = topologyNames(options.environment);
   const queue = options.queue ?? names.queue;
   const exchange = options.exchange ?? names.exchange;
+  // Where attempts go that can never be claimed, or outlived the delivery
+  // limit. Nothing consumes it: it is for an operator to inspect and replay.
+  const deadLetterQueue = `${queue}.dead`;
 
   await channel.assertExchange(exchange, 'fanout', { durable: true });
+  await channel.assertQueue(deadLetterQueue, {
+    durable: true,
+    arguments: { 'x-queue-type': 'quorum' },
+  });
 
   await channel.assertQueue(queue, {
     durable: true,
     arguments: {
       ...ATTEMPTS_QUEUE_ARGS,
       ...(options.maxLength === undefined ? {} : { 'x-max-length': options.maxLength }),
+      // The default exchange routes by queue name.
+      'x-dead-letter-exchange': '',
+      'x-dead-letter-routing-key': deadLetterQueue,
     },
   });
 
-  return { queue, exchange };
+  return { queue, exchange, deadLetterQueue };
+}
+
+type TopologyOptions = Parameters<typeof assertTopology>[1];
+
+/**
+ * `assertTopology` for startup: first replaces an attempts queue declared with
+ * different arguments, by an earlier version, if it is empty.
+ *
+ * RabbitMQ refuses to redeclare a queue with other arguments; deleting it is
+ * the only way to change them. Quorum queues have no atomic delete-if-empty,
+ * so this checks and then deletes: safe once nothing of the earlier version
+ * still publishes — new API instances cannot until the queue is replaced, so
+ * stop the old ones first, as every script and Compose do. A queue that still
+ * holds attempts is left alone and startup fails: let the old worker drain it.
+ *
+ * Takes the connection because the refusal closes the channel it happens on.
+ */
+export async function declareTopology(
+  connection: ChannelModel,
+  options: TopologyOptions = {},
+): Promise<Awaited<ReturnType<typeof assertTopology>>> {
+  try {
+    return await withChannel(connection, (channel) => assertTopology(channel, options));
+  } catch (error) {
+    if (!isPreconditionFailed(error)) throw error;
+  }
+
+  const queue = options.queue ?? topologyNames(options.environment).queue;
+  await withChannel(connection, async (channel) => {
+    const { messageCount } = await channel.checkQueue(queue);
+    if (messageCount > 0) {
+      throw new Error(
+        `queue ${queue} was declared with other arguments and is not empty ` +
+          `(${messageCount} waiting); let the previous worker drain it, then start again`,
+      );
+    }
+    await channel.deleteQueue(queue);
+  });
+  return withChannel(connection, (channel) => assertTopology(channel, options));
+}
+async function withChannel<T>(
+  connection: ChannelModel,
+  use: (channel: Channel) => Promise<T>,
+): Promise<T> {
+  const channel = await connection.createChannel();
+  // A refused declaration closes the channel with an error event as well as
+  // rejecting; the rejection carries the detail, so the event is not needed.
+  channel.on('error', () => {});
+  try {
+    return await use(channel);
+  } finally {
+    await channel.close().catch(() => {});
+  }
+}
+
+function isPreconditionFailed(error: unknown): boolean {
+  return (error as { code?: unknown } | undefined)?.code === 406;
 }
