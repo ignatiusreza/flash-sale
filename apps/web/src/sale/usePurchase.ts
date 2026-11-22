@@ -31,21 +31,29 @@ export function usePurchase(
     setPurchaseState((current) => applyResult(current, result, attemptRef.current));
   });
 
-  // On arrival, ask whether this user already holds an order. This is the
-  // reconnect source of truth: without it a returning visitor sees a Buy
-  // button for something they already own.
+  // Ask whether this user already holds an order: on arrival, so a returning
+  // visitor is not offered a Buy button for something they own, and after
+  // every reconnect, because a result pushed while the socket was down is gone
+  // for good while the order it announced is not (docs/PLAN.md §5).
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
 
-    void findOrder(userId).then((orderId) => {
-      if (!cancelled && orderId) setPurchaseState({ status: 'held', orderId });
-    });
+    const sync = () => {
+      void findOrder(userId).then((orderId) => {
+        if (!cancelled && orderId) setPurchaseState({ status: 'held', orderId });
+      });
+    };
+    sync();
+    // The manager's `reconnect` fires only for automatic reconnects, not for
+    // the deliberate reconnect `useSocket` does when the identity changes.
+    socket.io.on('reconnect', sync);
 
     return () => {
       cancelled = true;
+      socket.io.off('reconnect', sync);
     };
-  }, [userId]);
+  }, [userId, socket]);
 
   const purchase = useCallback(async () => {
     // Start collecting: the socket handler appends to this while we wait.
