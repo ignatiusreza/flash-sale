@@ -84,6 +84,28 @@ export function applyResult(
   }
 }
 
+/**
+ * Folds the response to our own POST into the state, given the results that
+ * arrived while it was in flight.
+ *
+ * The worker can settle an attempt and push its result before the 202 that
+ * names it reaches the client — measured within 0–2 ms of each other locally.
+ * So the response must never regress a state a result already settled, and a
+ * rejection that arrived before we knew our attempt id has to be matched up
+ * once we do; otherwise the page sits on "queued" for an attempt long decided.
+ */
+export function applyOwnResponse(
+  state: PurchaseState,
+  response: PurchaseState,
+  arrivedEarly: readonly PurchaseResultEvent[],
+): PurchaseState {
+  if (isTerminal(state)) return state;
+  if (response.status !== 'queued') return response;
+
+  const ours = arrivedEarly.find((event) => event.attemptId === response.attemptId);
+  return ours ? applyResult(response, ours, response.attemptId) : response;
+}
+
 /** Maps an API response to a state, for the paths that never reach the queue. */
 export function applyResponse(status: number, body: unknown): PurchaseState {
   const payload = (body ?? {}) as { status?: string; attemptId?: string; error?: string };

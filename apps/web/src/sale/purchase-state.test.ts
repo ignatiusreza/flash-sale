@@ -2,6 +2,7 @@ import type { PurchaseResultEvent } from '@flash-sale/core';
 import { describe, expect, it } from 'vitest';
 
 import {
+  applyOwnResponse,
   applyResponse,
   applyResult,
   canPurchase,
@@ -17,6 +18,43 @@ const event = (over: Partial<PurchaseResultEvent>): PurchaseResultEvent => ({
   userId: 'alice',
   status: 'confirmed',
   ...over,
+});
+
+// The result can beat the 202 that names its attempt: both arrive within a
+// couple of milliseconds, and the socket frame is handled first.
+describe('applyOwnResponse', () => {
+  const submitting = { status: 'submitting' } as const;
+
+  it('keeps an order a result already delivered', () => {
+    const held = { status: 'held', orderId: 'o1' } as const;
+
+    expect(applyOwnResponse(held, queued, [])).toEqual(held);
+  });
+
+  it('applies our rejection that arrived before we knew our attempt id', () => {
+    const early = [event({ status: 'sold_out' })];
+
+    expect(applyOwnResponse(submitting, queued, early)).toEqual({
+      status: 'rejected',
+      reason: 'sold_out',
+    });
+  });
+
+  it('ignores early results for other attempts', () => {
+    const early = [event({ attemptId: 'another-tab', status: 'sold_out' })];
+
+    expect(applyOwnResponse(submitting, queued, early)).toEqual(queued);
+  });
+
+  it('queues when nothing has arrived yet', () => {
+    expect(applyOwnResponse(submitting, queued, [])).toEqual(queued);
+  });
+
+  it('takes a response that never reached the queue as it is', () => {
+    expect(applyOwnResponse(submitting, { status: 'rateLimited' }, [])).toEqual({
+      status: 'rateLimited',
+    });
+  });
 });
 
 describe('applyResult', () => {
