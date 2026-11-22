@@ -59,6 +59,46 @@ function reachable(host, port, timeoutMs = 2000) {
   });
 }
 
+/**
+ * Whether `port` can be bound, found by binding it. Bound with no host, so on
+ * a dual-stack machine a listener on either IPv4 or IPv6 makes it unavailable.
+ */
+function portFree(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', (error) => resolve(error.code));
+    server.listen({ port }, () => server.close(() => resolve(true)));
+  });
+}
+
+/**
+ * Refuses to start when the API or web port is taken, typically by an earlier
+ * `pnpm dev` still running. Starting anyway fails badly: the API crashes on
+ * EADDRINUSE but `node --watch` waits for a file change instead of exiting, so
+ * the stack looks up while nothing answers.
+ */
+async function checkPorts() {
+  const ports = [
+    ['API', Number(process.env.PORT || 3000)],
+    // Must match `server.port` in apps/web/vite.config.ts.
+    ['web dev server', 5173],
+  ];
+  const results = await Promise.all(ports.map(([, port]) => portFree(port)));
+
+  let ok = true;
+  ports.forEach(([name, port], i) => {
+    if (results[i] === true) return;
+    ok = false;
+    const why =
+      results[i] === 'EADDRINUSE' ? 'is already in use' : `cannot be bound (${results[i]})`;
+    say('dev', `port ${port} for the ${name} ${why}`);
+  });
+  if (!ok) {
+    say('dev', '  is another `pnpm dev` still running? Stop it, or free the port, then retry');
+    process.exit(1);
+  }
+}
+
 async function resolveServices() {
   // Values already in the environment win over `.env`, so a one-off override on
   // the command line still works. The devcontainer sets both this way.
@@ -152,6 +192,8 @@ async function shutdown(code) {
 }
 
 const env = await resolveServices();
+// After resolveServices, which loads `.env` and so any PORT override in it.
+await checkPorts();
 
 say('dev', 'building once so the watchers have something to run…');
 await run('pnpm', ['-s', 'build']);
