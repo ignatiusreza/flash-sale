@@ -170,6 +170,8 @@ export function supervisor(name) {
       say(name, `${childName} exited (${code}) — shutting the rest down`);
       void shutdown(code ?? 1);
     });
+
+    return child;
   }
 
   /** Signals the whole process group, so nothing is left holding a port. */
@@ -201,6 +203,14 @@ export function supervisor(name) {
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.on(signal, () => void shutdown(0));
   }
+  // A crash in the script itself — a top-level await that throws lands here
+  // too — must still stop the children, or they outlive it holding ports.
+  for (const event of ['uncaughtException', 'unhandledRejection']) {
+    process.on(event, (error) => {
+      console.error(error);
+      void shutdown(1);
+    });
+  }
 
-  return { say: (line) => say(name, line), run, resolveServices, checkPorts, start };
+  return { say: (line) => say(name, line), run, resolveServices, checkPorts, start, shutdown };
 }

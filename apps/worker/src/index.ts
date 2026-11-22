@@ -1,10 +1,10 @@
 import {
   assertTopology,
+  connectBroker,
   publishResults,
   ROUTING_KEY_RESULTS,
   startBatchConsumer,
 } from '@flash-sale/messaging';
-import amqp from 'amqplib';
 
 import { createPool } from './db/pool.js';
 import { handleBatch } from './claim/handler.js';
@@ -27,9 +27,15 @@ async function main(): Promise<void> {
   const pool = createPool(databaseUrl);
   await migrate(pool, (message) => console.warn(message));
 
-  const connection = await amqp.connect(rabbitUrl);
+  const connection = await connectBroker(rabbitUrl);
   const channel = await connection.createConfirmChannel();
-  const { queue, exchange } = await assertTopology(channel, { environment });
+  // Must match the API's, or declaring the queue fails: see QUEUE_MAX_LENGTH
+  // in apps/api/src/config.ts.
+  const maxLength = Number(process.env.QUEUE_MAX_LENGTH) || undefined;
+  const { queue, exchange } = await assertTopology(channel, {
+    environment,
+    ...(maxLength ? { maxLength } : {}),
+  });
 
   const consumer = await startBatchConsumer({
     channel,

@@ -11,6 +11,12 @@ const schema = z.object({
    * keeps the plain ones.
    */
   APP_ENV: z.string().default('production'),
+  /**
+   * Overrides the attempts queue's length bound, past which the API sheds with
+   * 503. Only so the stress suite can reach it in seconds; the worker must use
+   * the same value, or declaring the queue fails (`assertTopology`).
+   */
+  QUEUE_MAX_LENGTH: z.coerce.number().int().positive().optional(),
   SALE_ID: z.string().min(1).default('flash'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),

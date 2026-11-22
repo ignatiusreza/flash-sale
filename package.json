@@ -20,6 +20,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "stress": "node scripts/stress.mjs",
     "test:watch": "vitest",
     "audit": "pnpm audit --audit-level=high",
     "licenses:check": "node scripts/check-licenses.mjs",

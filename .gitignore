@@ -13,3 +13,4 @@ test-results/
 pgdata/
 *.log
 .DS_Store
+tests/stress/out/
