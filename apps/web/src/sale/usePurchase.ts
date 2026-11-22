@@ -1,6 +1,8 @@
 import type { PurchaseResultEvent } from '@flash-sale/core';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { Socket } from 'socket.io-client';
 
+import { useSocketEvent } from '../realtime/useSocketEvent.js';
 import { findOrder, submitPurchase } from './api.js';
 import { applyResult, idle, type PurchaseState } from './purchase-state.js';
 
@@ -12,7 +14,7 @@ import { applyResult, idle, type PurchaseState } from './purchase-state.js';
  */
 export function usePurchase(
   userId: string,
-  lastResult: PurchaseResultEvent | undefined,
+  socket: Socket,
 ): { purchaseState: PurchaseState; purchase: () => Promise<void> } {
   const [purchaseState, setPurchaseState] = useState<PurchaseState>(idle);
   // A ref, not state: it only decides how results are read, never what renders.
@@ -20,10 +22,9 @@ export function usePurchase(
 
   // The socket may report an order this tab never asked for — another tab, or
   // an earlier visit. Folding it in is what keeps tabs agreeing.
-  useEffect(() => {
-    if (!lastResult) return;
-    setPurchaseState((current) => applyResult(current, lastResult, attemptRef.current));
-  }, [lastResult]);
+  useSocketEvent<PurchaseResultEvent>(socket, 'purchase:result', (result) => {
+    setPurchaseState((current) => applyResult(current, result, attemptRef.current));
+  });
 
   // On arrival, ask whether this user already holds an order. This is the
   // reconnect source of truth: without it a returning visitor sees a Buy
