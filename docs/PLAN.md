@@ -20,7 +20,7 @@ Everything below optimises for making those three legible.
 |---|---|---|---|
 | 1 | Configurable sale window | No claim outside `[startAt, endAt)` | API fast-reject + worker |
 | 2 | Single product, limited stock | `count(orders) <= totalStock`, always | Conditional claim statement (§4) |
-| 3 | One item per user | `count(orders where user) <= 1` | Worker buyer set + `UNIQUE (sale_id, user_id)` |
+| 3 | One item per user | `count(orders where user) <= 1` | `ON CONFLICT` in the claim + `UNIQUE (sale_id, user_id)` |
 | 4 | API: status / purchase / check | — | Fastify HTTP + WebSocket |
 | 5 | React frontend | — | Vite + React + Socket.IO client |
 | 6 | System diagram | — | Mermaid in README |
@@ -60,14 +60,16 @@ flowchart TB
 
     A1 & A2 -->|publish attempt - publisher confirms| Q[[RabbitMQ: attempts queue, single-active-consumer, bounded length]]
 
-    Q --> W[Worker - serial, batched, in-memory stock and buyer set]
-    W -->|conditional claim, one transaction| P[(Postgres: sales + orders)]
-    P -.->|rebuild state on promotion| W
+    Q --> W[Worker - serial, batched]
+    W -->|conditional claim, one statement per batch| P[(Postgres: sales + orders)]
+    P -.->|sale re-read every second| A1 & A2
 
-    W -->|results, sellout, presence| F[[RabbitMQ fanout exchange]]
+    W -->|results| F[[RabbitMQ fanout exchange]]
     F -.-> A1
     F -.-> A2
 ```
+
+*Revised in phase 8 to match what was built.* The first draft had the worker hold stock and the buyer set in memory, rebuilt from Postgres on promotion, and publish a sellout message. The counter-row decision (§16 q5) made all three unnecessary: the claim locks the sale row and reads stock under that lock, a buyer's existing order is found by one lookup per batch, and API instances learn of sellout from their once-a-second refresh. The worker holds no state, so a promoted worker has nothing to rebuild.
 
 **The queue is the concurrency control.** A single active consumer processes attempts in order, so there is no race to arbitrate — correctness comes from the topology, not from clever locking. The worker checks and claims in one database transaction, which means there is no separately-granted outcome waiting to be persisted, and therefore **no outbox and no two-system divergence**.
 
@@ -75,7 +77,7 @@ flowchart TB
 
 - **API (Fastify + Socket.IO).** Rejects what it can for free (§6), publishes the rest to RabbitMQ with publisher confirms, and holds the user's WebSocket. Horizontally scalable; the only state it holds is its own socket map.
 - **RabbitMQ.** Carries purchase *attempts* (requests, not decisions) on a durable, length-bounded **quorum** queue with `x-single-active-consumer`, replicated across a three-node cluster (§5.1), and carries results, sellout and presence back on a fanout exchange.
-- **Worker.** The sole writer. Holds stock and the buyer set in memory, batches claims into transactions, and publishes each outcome to the fanout. Rebuilds its state from Postgres on startup or promotion.
+- **Worker.** The sole writer. Batches claims into single-statement transactions and publishes each outcome to the fanout after the commit. Holds no state of its own: stock is read under the claim's lock.
 - **Postgres.** System of record and the durable enforcer of both invariants. Chosen over MongoDB on measurement, not habit: [`prototype/postgres-vs-mongo/`](./prototype/postgres-vs-mongo/) puts it 3–7× faster at equal fairness, and finds that MongoDB has no `FOR UPDATE SKIP LOCKED` equivalent — so it must trade arrival-order fairness for throughput, while Postgres gets both.
 
 **Why the queue, and not a distributed cache making the decision:** the alternative I costed first was an atomic Redis Lua script granting stock synchronously, with a stream handing off to a persistence worker. It is faster (§13) but strictly worse on correctness: a grant lives in Redis before it reaches Postgres, so a crash in that window means a user was told "confirmed" and holds nothing. In the design below, a result is only ever published **after** the transaction commits — the system never tells a user something false. The spike that evaluated it is kept at [`prototype/redis-grant/`](./prototype/redis-grant/).
@@ -105,7 +107,7 @@ ON CONFLICT (sale_id, user_id) DO NOTHING
 RETURNING id;
 ```
 
-An empty result means "no unit taken", for either reason — sold out, or this user already holds one. The worker distinguishes the two from its in-memory buyer set, which is cheap and never authoritative.
+An empty result means "no unit taken", for either reason — sold out, or this user already holds one. The worker distinguishes the two with one lookup of existing orders per batch (`findExistingOrders`).
 
 This single-claim form is correct but slow (§4.3): it pays an fsync per purchase. The worker ships the batched form below.
 
@@ -262,7 +264,7 @@ Not every queue should be quorum. The per-instance queues bound to the results f
 - **A network partition still fails the minority side.** Quorum queues are CP: nodes in the minority cannot serve the queue. That is the correct choice here — availability bought by accepting writes into a partition that may be rolled back is exactly the false-confirmation failure this design exists to avoid.
 - **Consensus costs throughput.** Every publish is replicated and acknowledged by a majority, so a quorum queue is slower per message than a single-node classic queue. The bounded queue above matters more, not less, once this cost is real.
 
-For the exercise itself, `docker-compose.yml` runs a single broker so the reviewer's first command stays fast, with a cluster overlay if time allows. The production topology is a documented decision, not an undemonstrated claim — which is the distinction §12 draws for everything else that is simplified for local running.
+For the exercise itself, `docker-compose.yml` runs a single broker so the reviewer's first command stays fast; the cluster overlay considered here was not built. The production topology is a documented decision, not an undemonstrated claim — which is the distinction §12 draws for everything else that is simplified for local running.
 
 ## 6. Early rejection: what never reaches the queue
 
@@ -271,12 +273,14 @@ Most flash-sale traffic is doomed, and the cheapest request is the one that neve
 1. **Window check — free.** `startAt`/`endAt` are static config, so the entire pre-sale rush and everything after the end is rejected in process with zero I/O.
 2. **Sellout flag — one message, then free.** When the worker takes the last unit it publishes `SOLD_OUT` once to the fanout; every API instance sets a local boolean and rejects in memory from then on. This is safe because **sellout is monotonic**: it only ever flips one way, and only the sole writer can flip it. A stale flag can only ever be wrong in the harmless direction (enqueueing a doomed attempt that the worker rejects), never in the direction that wrongly rejects a buyer.
 
+   *Not built (noted in phase 8).* Filter 3's one-second refresh alone proved enough: in the stress run, everything after sellout except the attempts arriving within that second was refused from cache — 208 000 of 233 000. The message would shorten that window from a second to milliseconds; the reasoning below about monotonicity applies to the refreshed value just the same.
+
    This monotonicity is an assumption, not a law, and it holds only while a claim is final. Anything that can return a unit to a live sale — a payment step with expiring reservations (§15.2), or a manual restock — makes the flag a cache rather than a terminal state, and the reasoning above stops being valid. Filter 3 below is what keeps it honest, which is why it is not optional.
 3. **Periodic refresh — one row per instance per second.** Each instance re-reads `sales.remaining` on a timer, covering instances that booted late or missed the fanout message. This is why `remaining` is a denormalized column rather than a `count(*)`: it keeps the refresh a single primary-key read.
 
    Note that this filter consumes `remaining` almost entirely as a *boolean*. That is what makes the pool model of §16 q5 a drop-in replacement despite having no counter: `EXISTS` against its partial index answers the same question in one probe.
 
-Deliberately **not** filtered at the API layer: "already purchased". It needs a per-user lookup, the frontend already disables the button while a request is in flight, and the worker rejects duplicates from its in-memory buyer set for almost nothing. Paying a database round trip per request to catch a rare case would be a bad trade.
+Deliberately **not** filtered at the API layer: "already purchased". It needs a per-user lookup, the frontend already disables the button while a request is in flight, and the worker finds duplicates with one lookup per batch for almost nothing. Paying a database round trip per request to catch a rare case would be a bad trade.
 
 Rate limiting still applies on top: a per-IP and per-user token bucket, rejecting with `429`. Not in the brief, but an endpoint this attractive without a limiter is a conspicuous omission.
 
@@ -508,6 +512,8 @@ Ordered so the risky part is proven first. Estimates are for a focused build.
 | 6 | **E2E** | Playwright: purchase flow, reconnect, presence, timezone/clock, rejections; test-only seed endpoint | 2–3 h |
 | 7 | Stress | k6 scenarios incl. WebSocket result latency and load shedding | 2–3 h |
 | 8 | Write-up | README, Mermaid diagram, trade-offs, run instructions, stress summary | 2 h |
+
+*All eight phases are complete.* Where the build departed from this plan, the section concerned says so in an "as built" or "revised" note; the README summarises the result.
 
 E2E lands immediately after the frontend because the two are written against the same states, and because the `reconnect` spec is the cheapest way to find out whether §5's "a dropped socket is cosmetic" is actually true before the stress run depends on it.
 
