@@ -37,9 +37,11 @@ async function main(): Promise<void> {
     ...(maxLength ? { maxLength } : {}),
   });
 
+  const batchMax = Number(process.env.CLAIM_BATCH_MAX) || undefined;
   const consumer = await startBatchConsumer({
     channel,
     queue,
+    ...(batchMax ? { batchMax } : {}),
     handle: async (attempts) => {
       const message = await handleBatch(pool, saleId, attempts);
       // After the commit, never before: see startBatchConsumer.

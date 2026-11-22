@@ -65,7 +65,7 @@ flowchart TB
 
     B -- "POST /api/orders → 202<br/>WebSocket: result, status, viewers" --> API
     API -- "publish attempt, wait for confirm" --> Q
-    Q -- "batches of up to 100" --> W
+    Q -- "batches of up to 500" --> W
     W -- "one statement per batch" --> P
     W -- "results, only after commit" --> F
     F -- "to every instance" --> API
@@ -125,7 +125,7 @@ Each is argued at length, with measurements, in `docs/PLAN.md`.
 
 1. **Asynchronous purchase: `202`, then the answer over a WebSocket** (PLAN §3). A synchronous claim per request means every request holds a database lock — measured as a lock convoy at 899 claims/s with 55 ms mean latency. Queueing turns the stampede into an orderly line. *The cost:* the client must handle an answer that arrives separately — reconnects, refreshes and several tabs all have to be designed for, and are tested.
 
-2. **One worker, settling claims in batches** (§4). A single active consumer means there is no race to arbitrate: correctness comes from the topology, not from locking. Batching is what makes one worker fast enough — 835 claims/s one at a time, ~37 000–41 500/s at 100 per single-statement transaction, because the fsync per commit is amortised. *The cost:* that one consumer is the throughput ceiling (see [Scalability](#scalability)).
+2. **One worker, settling claims in batches** (§4). A single active consumer means there is no race to arbitrate: correctness comes from the topology, not from locking. Batching is what makes one worker fast enough — 835 claims/s one at a time, ~37 000–41 500/s at 100 per single-statement transaction, because the fsync per commit is amortised. Batches go up to 500 (`CLAIM_BATCH_MAX`): under light load the 5 ms timer flushes first, so large batches only form in a rush, when throughput is what counts. *The cost:* that one consumer is the throughput ceiling (see [Scalability](#scalability)).
 
 3. **A stock counter row, not a pool of unit rows** (§16 q5). Both were measured. The counter is simpler and batches better; a pool gives each unit a lifecycle, which only matters once there is a payment step with reservations (§15.2). Decided counter, with the switch point written down.
 
@@ -160,7 +160,7 @@ The property under all of it: **nobody is told "confirmed" unless the order is c
 ## Scalability
 
 - **The API scales out** freely — it holds nothing but its sockets — and absorbs the bulk of a rush on its own, from memory.
-- **The worker is deliberately singular**, and is the ceiling: ~33 000 claims/s for the worker path in isolation, ~8 600 attempts/s on the queue path in the shared-laptop stress run when every attempt is a winner. Beyond it the system sheds rather than slows.
+- **The worker is deliberately singular**, and is the ceiling: ~44 000 claims/s for the worker path in isolation at batches of 500, and ~18 000 attempts/s on the queue path in the shared-laptop stress run when every attempt is a winner — where k6, not the worker, ran out first. Beyond it the system sheds rather than slows.
 - **The next 10×** (PLAN §15.1): shard the stock into K rows with one consumer each, routed by buyer; or put a fast admission filter ahead of the queue that lets only potential winners through. Neither requires changing the claim.
 
 ## Testing
@@ -205,16 +205,17 @@ Each run builds the app and starts its own stack with **two API instances** — 
 
 | Scenario | Target (PLAN §2.3) | Measured |
 | --- | --- | --- |
-| `sale` — buyers connected over the socket, timed from `POST` to result | p99 < 100 ms | p50 9 ms, p95 24 ms, **p99 34 ms** |
-| `sale` — the rush, ramped to and held at the target rate | ≥ 10 000 attempts/s sustained | **10 000/s held for 20 s**, 0 failed, `POST` p99 21 ms |
+| `sale` — buyers connected over the socket, timed from `POST` to result | p99 < 100 ms | p50 9 ms, p95 25 ms, **p99 35 ms** |
+| `sale` — the rush, ramped to and held at the target rate | ≥ 10 000 attempts/s sustained | **10 000/s held for 20 s**, 0 failed, `POST` p99 22 ms |
 | `sale` — correctness: 20 000 units, 11.7× oversubscribed | no oversell, no double grant | **20 000 orders to 20 000 distinct buyers, stock 0** |
 | `shedding` — worker stopped, 5 000/s against a bound of 2 000 | clean rejection, nothing lost | 47 918 shed with `503`; **all 2 005 accepted became orders**; API memory +41 MB |
-| `capacity` — 10 000/s held, stock that never sells out | — | ~8 600/s sustained through the queue; past that, clean `503`s |
+| `capacity` — ramped to 20 000/s offered, stock that never sells out | — | **~18 000/s sustained through the queue**, nothing shed; k6 could not offer more |
 
 **Reading the results:**
 
 - **The rush is held at the API.** Of 233 000 attempts, 208 000 were refused from the in-memory cache once stock was gone; only ~25 000 — the winners, plus those arriving within the cache's one-second refresh — ever reached the queue. Doomed traffic is the cheapest to answer, by design.
-- **The queue path's own ceiling is lower,** ~8 600 attempts/s when every attempt wins, on hardware shared with everything else. Past it the system degrades by shedding with `503`, not by growing latency or losing purchases — `shedding` proves both halves.
+- **The queue path's own ceiling is lower,** but above what this laptop can offer: ~18 000 attempts/s when every attempt wins, on hardware shared with everything else. At batches of 100 the same run topped out at ~8 000/s and shed 241 000 attempts; at 500 it shed none. Past its ceiling the system degrades by shedding with `503`, not by growing latency or losing purchases — `shedding` proves both halves.
+- **Batch size does not cost latency.** Alternating runs at 100 and 500 gave the same result p99 (32–40 ms and 35–42 ms): only ~25 000 attempts reach the queue over the whole run, a few per 5 ms flush, so neither size is ever reached.
 - **The queue's bound is approximate** with two instances publishing at once (2 005 accepted for 2 000). What matters holds: it stops growing, and nothing accepted is lost.
 - **The first run found a real bug.** The worker drained at ~4 000 claims/s against ~35 000 for the claim alone: Nagle's algorithm held each batch's ack ~20 ms behind its result publish. With it off (`connectBroker`), the same drain runs at ~33 000/s.
 

@@ -63,6 +63,7 @@ There are only two application services, `api` and `worker`. The API serves the 
 | `WEB_ROOT` | — | directory of the built SPA; unset, the process is a pure API |
 | `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
 | `APP_ENV` | `production` | whose data: names the RabbitMQ queue and exchange — see [Environments](#environments) |
+| `CLAIM_BATCH_MAX` | `500` | worker: the most attempts settled in one claim; smaller batches form under light load anyway |
 | `SEED_STOCK` | `100` | units in the seeded sale |
 | `SEED_DURATION_MINUTES` | `60` | how long it stays open |
 | `SEED_RESET` | — | `1` to recreate the sale and drop its orders |

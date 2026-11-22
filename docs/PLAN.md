@@ -150,7 +150,7 @@ Three properties, each load-bearing and each verified in §4.4:
 RabbitMQ has no "give me 100 messages" call; `amqplib` pushes one at a time. Batching is therefore something the worker does, with a size-or-time flush:
 
 ```ts
-const BATCH_MAX = 100;
+const BATCH_MAX = 500;                  // CLAIM_BATCH_MAX; sized in §16 q4
 const FLUSH_MS  = 5;
 
 await channel.prefetch(BATCH_MAX * 2);   // keep the next batch arriving while this one commits
@@ -339,8 +339,9 @@ CREATE TABLE orders (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (sale_id, user_id)          -- the durable one-per-user backstop
 );
-CREATE INDEX ON orders (sale_id);
 ```
+
+*Revised in phase 8.* The first schema also had `CREATE INDEX ON orders (sale_id)`. The unique index already leads with `sale_id`, so it was redundant — and harmful: on statistics taken before a sale fills, which is every flash sale, the planner chose it for the worker's existing-orders lookup and scanned every order in the sale instead of probing `(sale_id, user_id)`, 2.3× slower per losing batch at 20 000 orders. Migration `0002` drops it, which also saves an index write per order.
 
 `CHECK (remaining >= 0)` is the durable anti-oversell backstop: even a logic bug cannot drive stock negative, because Postgres will abort the transaction. Combined with the `UNIQUE` constraint, both headline invariants are enforced by the database independently of any application code.
 
@@ -588,7 +589,9 @@ Nothing here blocks a start; each has a stated default I will proceed under.
 1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with in-memory adapters for the queue and store so unit tests run with no containers.*
 2. **How long is the exercise meant to take?** The phasing above is ~20 hours. *Default: build phases 0–6 and 8 to a high standard, then 7 as time allows.*
 3. ~~**Should the stress test run in CI?**~~ **Decided in phase 7: no, manual, with results in the README.** It needs sustained load and will be slow and noisy on shared runners. *Default: unit, integration, the two invariant tests and the Playwright suite all run in CI — the E2E layer is slow in wall-clock terms but not load-sensitive, so it is reliable on a shared runner in a way k6 is not. The full k6 run stays manual, with its results committed.*
-4. **How large is the batch window?** 100 claims per transaction and a 5 ms flush are what §4.2 assumes and §4.3 measures, but the pair trades latency against throughput and the right values depend on burst shape. *Default: ship those, instrument batch-size distribution and flush-reason, and tune against the stress results rather than guessing up front.*
+4. ~~**How large is the batch window?**~~ **Decided in phase 8: up to 500 claims, 5 ms flush, `CLAIM_BATCH_MAX` to override.** Draining the worker path measured ~31 000 claims/s at 100, ~40 000 at 250, ~44 000 at 500 and ~53 000 at 1000: handle time grows slower than batch size, because the fsync and the round trip are per batch. End to end, the `capacity` stress run went from ~8 000 attempts/s with 241 000 shed at 100 to ~18 000/s with none shed at 500, at the same offered load. Latency did not move — alternating `sale` runs gave result p99 32–40 ms at 100 and 35–42 ms at 500 — because the size-or-time trigger keeps batches small whenever load is light. 500 rather than 1000 keeps a redelivered batch, and the prefetch of twice that, modest.
+
+   Folding the existing-orders lookup into the claim, to save its round trip, was tried and not kept: interleaved, it saved ~0.2 ms on losing batches — already >300 000 claims/s — and nothing on winning ones, which set the ceiling; and staying correct beside a second worker needed a snapshot-staleness check with a fallback query. Measuring it found the redundant index §9 now drops.
 5. ~~**Counter row, or a pool of claimable rows?**~~ **Decided 2026-11-20: counter row.** [`prototype/postgres-pool/`](./prototype/postgres-pool/) measures pre-warming stock as `user_id IS NULL` order rows claimed with `FOR UPDATE SKIP LOCKED`. It reaches 61k claims/s batched across 10 workers — ~1.5× this plan's design — and, because it removes the contended counter row, it also removes the main reason the queue exists. The deciding question is not throughput but whether a unit needs a lifecycle (§15.2). The brief has no payment step, so the counter stays and phase 1 builds §4.1 as written. **Revisit the moment payment enters scope**, because reservations need per-unit state and the batching advantage that favours the counter stops mattering once the PSP is the bottleneck.
 
    One thing the switch would *not* require, since it is a natural assumption: **the pool needs no counter of its own, and must not have one.** Maintaining `sales.remaining` alongside a pool would put every claim back onto a single contended row and undo the pool's entire benefit. It is unnecessary because §6's shortcut consumes only a boolean — `EXISTS (SELECT 1 FROM orders WHERE user_id IS NULL)` is a single probe of the partial index, as cheap as the primary-key read the counter design uses. The one place a number is genuinely wanted is the three-state `availability`, and `low` is answerable with a `LIMIT`-bounded count that stops at the threshold rather than scanning the remainder.
