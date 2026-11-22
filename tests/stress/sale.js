@@ -3,8 +3,7 @@ import exec from 'k6/execution';
 import { addressFor, buy, postAttempt, recordAttempt } from './lib/buyer.js';
 
 /**
- * An oversubscribed sale, in two phases, with a third riding the second
- * (docs/PLAN.md §2.3, §11):
+ * An oversubscribed sale, in two phases (docs/PLAN.md §2.3, §11):
  *
  * - `steady`: buyers at a moderate rate, each connected over the socket, timed
  *   from POST to result — the end-to-end wait when nothing else is queued.
@@ -14,9 +13,10 @@ import { addressFor, buy, postAttempt, recordAttempt } from './lib/buyer.js';
  *   stock is gone; the queue only sees what arrives before. A quarter of it is
  *   a buyer trying again, so the one-per-buyer path runs under load. Target:
  *   the rate held with nothing dropped and nothing failed.
- * - `probe`: socket-connected buyers at a modest rate *during* the rush, timed
- *   the same way as `steady` — the wait while the queue is under the rush,
- *   which `steady` alone never measures, since it ends before the rush starts.
+ *
+ * What a buyer waits while the queue is genuinely busy is `load`'s question,
+ * not this one's: this rush sells out within seconds, after which almost every
+ * attempt is refused from memory.
  *
  * The invariants are checked by the orchestrator afterwards, in Postgres and
  * against every result the worker published, since no API exposes them.
@@ -25,7 +25,6 @@ const BASES = __ENV.BASE_URLS.split(',');
 const STEADY_RATE = Number(__ENV.STEADY_RATE || 300);
 const RUSH_RATE = Number(__ENV.RUSH_RATE || 10_000);
 const RUSH_HOLD_S = Number(__ENV.RUSH_HOLD_S || 20);
-const PROBE_RATE = Number(__ENV.PROBE_RATE || 200);
 // The rush ramps from 1 000/s over 5 s, then holds. Held means at most 1% of
 // these were dropped for want of capacity — on a laptop shared with
 // everything else, a handful always are, and zero would test the laptop.
@@ -55,22 +54,10 @@ export const options = {
       preAllocatedVUs: 2_000,
       maxVUs: 5_000,
     },
-    probe: {
-      executor: 'constant-arrival-rate',
-      exec: 'probe',
-      startTime: '25s',
-      rate: PROBE_RATE,
-      timeUnit: '1s',
-      duration: `${5 + RUSH_HOLD_S}s`,
-      preAllocatedVUs: 100,
-      maxVUs: 1_000,
-    },
   },
   thresholds: {
     'result_latency{scenario:steady}': ['p(99)<100'],
-    // Reported, not gated: the rush is the laptop's whole capacity, and this
-    // says what a buyer waits while it runs — whatever that turns out to be.
-    'result_latency{scenario:probe}': ['p(99)>=0'],
+    'results_timed{scenario:steady}': ['count>0'],
     'dropped_iterations{scenario:rush}': [`count<${Math.ceil(RUSH_PLANNED * 0.01)}`],
     'dropped_iterations{scenario:steady}': ['count==0'],
     attempts_failed: ['count==0'],
@@ -78,15 +65,13 @@ export const options = {
     // Declared so the summary carries each phase on its own.
     'http_reqs{scenario:rush}': ['count>0'],
     'http_reqs{scenario:steady}': ['count>0'],
-    'http_reqs{scenario:probe}': ['count>0'],
     'http_req_duration{scenario:rush}': ['p(99)>=0'],
     'http_req_duration{scenario:steady}': ['p(99)>=0'],
-    'http_req_duration{scenario:probe}': ['p(99)>=0'],
   },
   summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
 };
 
-const OFFSETS = { steady: 0, rush: 1 << 22, probe: 2 << 22 };
+const OFFSETS = { steady: 0, rush: 1 << 22 };
 
 /** Distinct per iteration across all phases: no address or name shared between them. */
 function buyerNumber() {
@@ -114,10 +99,6 @@ export function rush() {
   // Every fourth attempt is the previous buyer again, on another instance.
   const buyer = n % 4 === 3 ? n - 1 : n;
   recordAttempt(postAttempt(BASES[n % BASES.length], `rush-${buyer}`, addressFor(n)));
-}
-
-export function probe() {
-  connectedBuyer('probe');
 }
 
 export function handleSummary(data) {

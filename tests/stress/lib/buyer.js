@@ -18,6 +18,7 @@ export const metrics = {
   otherResult: new Counter('results_other'),
   missing: new Counter('results_missing'), // accepted, but no result in time
   latency: new Trend('result_latency', true), // POST sent → result received
+  timed: new Counter('results_timed'), // samples behind `result_latency`: a p99 of ten means nothing
 };
 
 // 409, 429 and 503 are answers, not failures: keep them out of http_req_failed.
@@ -99,6 +100,7 @@ export function buy({ wsUrl, apiUrl, userId, ip, resultTimeoutMs = 30_000 }) {
       const [, result] = JSON.parse(message.slice(2));
       if (result.attemptId !== attemptId) return;
       metrics.latency.add(Date.now() - sentAt);
+      metrics.timed.add(1);
       if (result.status === 'confirmed') metrics.confirmed.add(1);
       else if (result.status === 'sold_out') metrics.soldOut.add(1);
       else metrics.otherResult.add(1);
