@@ -2,13 +2,14 @@ import { randomUUID } from 'node:crypto';
 
 import {
   assertTopology,
+  connectBroker,
   publishAttempt,
   PublishRejected,
   startBatchConsumer,
   type PurchaseAttempt,
   type PurchaseResultsMessage,
 } from '@flash-sale/messaging';
-import amqp, { type ChannelModel, type ConfirmChannel } from 'amqplib';
+import type { ChannelModel, ConfirmChannel } from 'amqplib';
 import type pg from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
@@ -63,7 +64,7 @@ describeQueue('queue wiring', () => {
   beforeAll(async () => {
     pool = createPool(DATABASE_URL!, 20);
     await migrate(pool);
-    connection = await amqp.connect(RABBITMQ_URL!);
+    connection = await connectBroker(RABBITMQ_URL!);
   });
 
   afterAll(async () => {

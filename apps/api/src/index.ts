@@ -1,11 +1,11 @@
 import {
   assertTopology,
+  connectBroker,
   publishAttempt,
   publishPresence,
   subscribeToEvents,
   type PurchaseResultsMessage,
 } from '@flash-sale/messaging';
-import amqp from 'amqplib';
 import pg from 'pg';
 
 import { loadConfig, testEndpointsEnabled } from './config.js';
@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const saleCache = new SaleCache(pool, config.SALE_ID, config.SALE_REFRESH_MS);
   await saleCache.start();
 
-  const connection = await amqp.connect(config.RABBITMQ_URL);
+  const connection = await connectBroker(config.RABBITMQ_URL);
   const channel = await connection.createConfirmChannel();
   const { queue, exchange } = await assertTopology(channel, {
     environment: config.APP_ENV,
