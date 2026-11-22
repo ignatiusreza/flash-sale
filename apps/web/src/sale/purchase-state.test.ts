@@ -5,6 +5,7 @@ import {
   applyOwnResponse,
   applyResponse,
   applyResult,
+  attemptOf,
   canPurchase,
   idle,
   isBusy,
@@ -178,6 +179,20 @@ describe('canPurchase', () => {
     expect(canPurchase({ status: 'held', orderId: 'o1' }, 'alice', open)).toBe(false);
     expect(canPurchase({ status: 'busy' }, 'alice', open)).toBe(true);
     expect(canPurchase({ status: 'failed', message: 'x' }, 'alice', open)).toBe(true);
+  });
+});
+
+describe('attemptOf', () => {
+  it('is the attempt being waited on, restored or not', () => {
+    expect(attemptOf(queued)).toBe('ours');
+    expect(attemptOf({ ...queued, restored: true })).toBe('ours');
+  });
+
+  // Before the 202 nobody knows it; once decided, nothing is waited on.
+  it('is nothing before the attempt is queued or after it is decided', () => {
+    expect(attemptOf({ status: 'submitting' })).toBeUndefined();
+    expect(attemptOf({ status: 'held', orderId: 'o1' })).toBeUndefined();
+    expect(attemptOf(idle)).toBeUndefined();
   });
 });
 

@@ -10,7 +10,15 @@ import type { Availability, PurchaseResultEvent, SaleStatus } from '@flash-sale/
 export type PurchaseState =
   | { readonly status: 'idle' }
   | { readonly status: 'submitting' }
-  | { readonly status: 'queued'; readonly attemptId: string }
+  | {
+      readonly status: 'queued';
+      readonly attemptId: string;
+      /**
+       * Restored after a refresh rather than sent by this page: its result
+       * may have been missed, so only it may be settled from the sale.
+       */
+      readonly restored?: true;
+    }
   | { readonly status: 'held'; readonly orderId: string }
   | { readonly status: 'rejected'; readonly reason: 'sold_out' | 'not_started' | 'ended' }
   | { readonly status: 'busy' }
@@ -27,6 +35,15 @@ export function isTerminal(state: PurchaseState): boolean {
 /** True while a click would be pointless or harmful. */
 export function isBusy(state: PurchaseState): boolean {
   return state.status === 'submitting' || state.status === 'queued';
+}
+
+/**
+ * The attempt this page is waiting on, whose rejection would be ours. Only
+ * while queued: before the 202 nobody knows it (`applyOwnResponse` covers
+ * that window), and once decided there is nothing left to wait for.
+ */
+export function attemptOf(state: PurchaseState): string | undefined {
+  return state.status === 'queued' ? state.attemptId : undefined;
 }
 
 /**
