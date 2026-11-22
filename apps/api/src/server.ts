@@ -7,7 +7,7 @@ import type { ServerDeps } from './deps.js';
 import { openApiDocument } from './http/openapi.js';
 import { spa } from './http/spa.js';
 import { healthRoutes } from './routes/health.js';
-import { purchaseRoutes } from './routes/purchase.js';
+import { orderRoutes } from './routes/orders.js';
 import { saleRoutes } from './routes/sale.js';
 
 export type { ServerDeps } from './deps.js';
@@ -32,11 +32,11 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     // every `additionalProperties: false` in `routes/` silently permissive —
     // the field is dropped and the request succeeds. This is instance-wide and
     // cannot be set per route, so it lives here even though what it protects
-    // is a schema elsewhere. `routes/purchase.test.ts` fails without it.
+    // is a schema elsewhere. `routes/orders.test.ts` fails without it.
     ajv: { customOptions: { removeAdditional: false } },
   });
 
-  // `global: false`: only the purchase endpoint is limited, and it opts in
+  // `global: false`: only creating an order is limited, and it opts in
   // itself. `/api/sale` is polled by every open tab by design, and limiting
   // health checks would make a busy instance look unhealthy.
   await app.register(rateLimit, { global: false });
@@ -50,7 +50,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
   await app.register(healthRoutes, deps);
   await app.register(saleRoutes, deps);
-  await app.register(purchaseRoutes, deps);
+  await app.register(orderRoutes, deps);
 
   // Last: its not-found handler is the SPA fallback, so every real route must
   // already be registered for it to know what is genuinely missing.

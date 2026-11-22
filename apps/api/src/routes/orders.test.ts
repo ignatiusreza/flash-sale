@@ -11,14 +11,14 @@ afterEach(async () => {
   await app?.close();
 });
 
-describe('POST /api/purchase', () => {
+describe('POST /api/orders', () => {
   it('queues an attempt and answers 202 once the broker confirms', async () => {
     const { app: server, published } = await createTestServer();
     app = server;
 
     const response = await app.inject({
       method: 'POST',
-      url: '/api/purchase',
+      url: '/api/orders',
       payload: { userId: 'alice' },
     });
 
@@ -27,6 +27,19 @@ describe('POST /api/purchase', () => {
     expect(response.json().attemptId).toMatch(/^[0-9a-f-]{36}$/);
     expect(published).toHaveLength(1);
     expect(published[0]).toMatchObject({ saleId: 'flash', userId: 'alice' });
+  });
+
+  it('points Location at the list the order will appear in', async () => {
+    ({ app } = await createTestServer());
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/orders',
+      payload: { userId: 'al ice/1' },
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.headers.location).toBe('/api/orders?userId=al%20ice%2F1');
   });
 
   it('does not answer until the publish has been confirmed', async () => {
@@ -38,7 +51,7 @@ describe('POST /api/purchase', () => {
     });
     ({ app } = await createTestServer({ publish: () => confirmed }));
 
-    const inFlight = app.inject({ method: 'POST', url: '/api/purchase', payload: { userId: 'a' } });
+    const inFlight = app.inject({ method: 'POST', url: '/api/orders', payload: { userId: 'a' } });
     const raced = await Promise.race([inFlight, Promise.resolve('pending' as const)]);
     expect(raced).toBe('pending');
 
@@ -57,7 +70,7 @@ describe('POST /api/purchase', () => {
 
     const response = await app.inject({
       method: 'POST',
-      url: '/api/purchase',
+      url: '/api/orders',
       payload: { userId: 'alice' },
     });
 
@@ -75,7 +88,7 @@ describe('POST /api/purchase', () => {
 
     const response = await app.inject({
       method: 'POST',
-      url: '/api/purchase',
+      url: '/api/orders',
       payload: { userId: 'alice' },
     });
 
@@ -92,7 +105,7 @@ describe('POST /api/purchase', () => {
 
     const response = await app.inject({
       method: 'POST',
-      url: '/api/purchase',
+      url: '/api/orders',
       payload: { userId: 'alice' },
     });
 
@@ -107,7 +120,7 @@ describe('POST /api/purchase', () => {
 
     const response = await app.inject({
       method: 'POST',
-      url: '/api/purchase',
+      url: '/api/orders',
       payload: { userId: 'alice' },
     });
 
@@ -123,7 +136,7 @@ describe('POST /api/purchase', () => {
     const { app: server, published } = await createTestServer();
     app = server;
 
-    const response = await app.inject({ method: 'POST', url: '/api/purchase', payload });
+    const response = await app.inject({ method: 'POST', url: '/api/orders', payload });
 
     expect(response.statusCode).toBe(400);
     expect(published).toHaveLength(0);
@@ -139,7 +152,7 @@ describe('POST /api/purchase', () => {
         responses.push(
           await app.inject({
             method: 'POST',
-            url: '/api/purchase',
+            url: '/api/orders',
             payload: { userId: 'spammer' },
           }),
         );
@@ -154,10 +167,10 @@ describe('POST /api/purchase', () => {
     it('tells a limited client when to retry instead of leaving it to guess', async () => {
       ({ app } = await createTestServer({ rateLimitPerMinute: 1 }));
 
-      await app.inject({ method: 'POST', url: '/api/purchase', payload: { userId: 'a' } });
+      await app.inject({ method: 'POST', url: '/api/orders', payload: { userId: 'a' } });
       const limited = await app.inject({
         method: 'POST',
-        url: '/api/purchase',
+        url: '/api/orders',
         payload: { userId: 'a' },
       });
 
@@ -172,7 +185,7 @@ describe('POST /api/purchase', () => {
       const flood = (userId: string, ip: string) =>
         app.inject({
           method: 'POST',
-          url: '/api/purchase',
+          url: '/api/orders',
           payload: { userId },
           remoteAddress: ip,
         });
@@ -185,30 +198,40 @@ describe('POST /api/purchase', () => {
   });
 });
 
-describe('GET /api/purchase/:userId', () => {
-  it('reports none when the user holds nothing', async () => {
+describe('GET /api/orders?userId=', () => {
+  it('lists nothing when the user holds no order', async () => {
     const pool = { query: vi.fn().mockResolvedValue({ rows: [] }) } as unknown as pg.Pool;
     ({ app } = await createTestServer({ pool }));
 
-    const response = await app.inject({ method: 'GET', url: '/api/purchase/nobody' });
+    const response = await app.inject({ method: 'GET', url: '/api/orders?userId=nobody' });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ status: 'none' });
+    expect(response.json()).toEqual([]);
   });
 
-  it('reports the existing order, which is what makes a dropped socket cosmetic', async () => {
+  it('lists the existing order, which is what makes a dropped socket cosmetic', async () => {
     const created = new Date('2026-11-20T10:30:00.000Z');
     const pool = {
       query: vi.fn().mockResolvedValue({ rows: [{ id: 'order-1', created_at: created }] }),
     } as unknown as pg.Pool;
     ({ app } = await createTestServer({ pool }));
 
-    const response = await app.inject({ method: 'GET', url: '/api/purchase/alice' });
+    const response = await app.inject({ method: 'GET', url: '/api/orders?userId=alice' });
 
-    expect(response.json()).toEqual({
-      status: 'confirmed',
-      orderId: 'order-1',
-      purchasedAt: '2026-11-20T10:30:00.000Z',
-    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([
+      { orderId: 'order-1', purchasedAt: '2026-11-20T10:30:00.000Z' },
+    ]);
+  });
+
+  // Unfiltered, this would list every buyer to anyone: there is no auth.
+  it('refuses to list without the user filter', async () => {
+    const query = vi.fn();
+    ({ app } = await createTestServer({ pool: { query } as unknown as pg.Pool }));
+
+    const response = await app.inject({ method: 'GET', url: '/api/orders' });
+
+    expect(response.statusCode).toBe(400);
+    expect(query).not.toHaveBeenCalled();
   });
 });

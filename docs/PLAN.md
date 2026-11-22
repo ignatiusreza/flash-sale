@@ -32,7 +32,7 @@ Invariants 2 and 3 get **two independent enforcers**: the worker's in-memory sta
 The brief leaves these open. Each is a defensible judgement call; the README will state the choice and the reason.
 
 - **Is there authentication?** No. `userId` is a client-supplied string, exactly as the brief's frontend description implies ("enter a user identifier"). The one-per-user rule is therefore enforced *per identifier*, not per human. I will say so explicitly rather than pretend otherwise, and note that in production this key would come from a verified session.
-- **Is the purchase synchronous?** No — and this is the central decision. `POST /api/purchase` returns `202 Accepted` once the attempt is durably queued; the outcome arrives over a WebSocket. The brief sanctions this directly by asking for a separate "check if you secured an item" endpoint, which doubles as the reconnect path. §3 explains why the asynchrony buys more than it costs — and §15.2 is the stronger reason: the moment a payment step exists, a synchronous response is impossible anyway, because no HTTP request should be held open across a PSP round trip. Choosing async now is what keeps that door open.
+- **Is the purchase synchronous?** No — and this is the central decision. `POST /api/orders` returns `202 Accepted` once the attempt is durably queued; the outcome arrives over a WebSocket. The brief sanctions this directly by asking for a separate "check if you secured an item" endpoint, which doubles as the reconnect path. §3 explains why the asynchrony buys more than it costs — and §15.2 is the stronger reason: the moment a payment step exists, a synchronous response is impossible anyway, because no HTTP request should be held open across a PSP round trip. Choosing async now is what keeps that door open.
 - **Is "already purchased" an error?** No — it is a success. Because each user may hold at most one item, `userId` is a natural idempotency key: a retried attempt resolves to the *same* order. This matters because the first thing a panicking user does is double-click.
 - **Is stock exposed?** Exact remaining stock is a poll magnet and leaks sale mechanics. The status endpoint returns a coarse `availability: "plenty" | "low" | "sold_out"`, not a live counter.
 - **Reservation or sale?** A claim is final, not a held reservation. There is no payment step in the brief, so a TTL'd reservation that can expire adds a class of states ("expired, stock returned") the requirement never asks for. Out of scope — but it is the first thing that changes if payment arrives, and §15.2 works through what it would cost.
@@ -50,7 +50,7 @@ Concrete numbers, so the stress test has something to pass or fail:
 
 ```mermaid
 flowchart TB
-    U[Browser - React + Socket.IO] -->|POST /api/purchase| A1
+    U[Browser - React + Socket.IO] -->|POST /api/orders| A1
     U <-->|WebSocket| A1
 
     subgraph API [API tier - horizontally scalable]
@@ -230,7 +230,7 @@ Four conclusions drive the rest of the design:
 
 | Failure | Behaviour | Severity |
 |---|---|---|
-| API instance dies | Sockets drop. Client reconnects to another instance and re-syncs via `GET /api/purchase/:userId`. An already-queued attempt still gets processed; the result is waiting. | None |
+| API instance dies | Sockets drop. Client reconnects to another instance and re-syncs via `GET /api/orders?userId=`. An already-queued attempt still gets processed; the result is waiting. | None |
 | Worker dies mid-batch | Uncommitted transaction rolls back; messages were never acked, so RabbitMQ redelivers them to the newly promoted consumer. | None |
 | Worker dies after commit, before ack | Redelivery re-runs the claim; `ON CONFLICT DO NOTHING` makes it a no-op and the result is re-published. Idempotent. | None |
 | Postgres down | Worker stops acking; the queue backs up to its bound, then the API sheds load with `503`. No incorrect answers are given. | Degraded, self-healing |
@@ -254,7 +254,7 @@ Two things this changes beyond uptime:
 - **Publisher confirms get stronger.** On a single node a confirm means "on one broker's disk". On a quorum queue it means "on a majority of replicas", so the confirm the API waits for before returning `202` now genuinely survives a node loss. The two mechanisms reinforce each other; neither is sufficient alone.
 - **`x-single-active-consumer` still applies**, so the serialization the whole design rests on is unaffected by replication.
 
-Not every queue should be quorum. The per-instance queues bound to the results fanout (§8) are exclusive and auto-delete — they are meant to die with their API instance, and losing one costs nothing because the client re-syncs via `GET /api/purchase/:userId`. Replicating them would pay a consensus cost for data with no value past the second it was produced.
+Not every queue should be quorum. The per-instance queues bound to the results fanout (§8) are exclusive and auto-delete — they are meant to die with their API instance, and losing one costs nothing because the client re-syncs via `GET /api/orders?userId=`. Replicating them would pay a consensus cost for data with no value past the second it was produced.
 
 **What this does not fix**, and the README should say so rather than imply a cluster is a cure:
 
@@ -287,9 +287,11 @@ The limiter is `@fastify/rate-limit`, whose default store is **in process, not s
 | Method | Path | Returns |
 |---|---|---|
 | `GET` | `/api/sale` | `{ status, availability, startAt, endAt, serverTime, viewers }` |
-| `POST` | `/api/purchase` | `202 { status: "queued", attemptId }` · `409 { status: sold_out\|not_started\|ended }` · `429` · `503` |
-| `GET` | `/api/purchase/:userId` | `{ status: none\|confirmed, orderId?, purchasedAt? }` — reconnect source of truth |
+| `POST` | `/api/orders` | create: `202 { status: "queued", attemptId }` + `Location: /api/orders?userId=` · `409 { status: sold_out\|not_started\|ended }` · `429` · `503` |
+| `GET` | `/api/orders?userId=` | index, filtered: `200 [{ orderId, purchasedAt }]` — zero or one entries · `400` without the filter — reconnect source of truth |
 | `GET` | `/healthz` `/readyz` `/metrics` | liveness, readiness, Prometheus |
+
+Orders are a REST resource with `index` and `create`. `new`/`edit` are server-rendered forms an SPA does not need; an order is immutable once claimed, so no `update`/`destroy` (cancellation arrives with payment, §15.2). A reconnecting client knows its user but not its order id, so it asks for the user's orders — a filtered `index`, not a `show` keyed by something other than the order's id. The filter is required: unfiltered, `index` would expose every buyer while there is no authentication. Nothing needs `show` yet; it would be `GET /api/orders/:orderId`. `create` answers `202 Accepted` rather than `201 Created` because the order is decided asynchronously, and its `Location` is the filtered index the order will appear in.
 
 WebSocket events pushed to the client:
 
@@ -369,7 +371,7 @@ Deliberately small — the brief asks for a demonstration, not a storefront. Vit
 - An explicit **queued** state between `202` and the WebSocket result — this is the honest representation of what the system is doing, and it is where a real flash sale shows a spinner.
 - Terminal states: *confirmed* (with order id), *already purchased*, *sold out*, *not started*, *ended*, *try again* (on `503`).
 - Live viewer count from `sale:viewers`.
-- On mount and on every reconnect, it calls `GET /api/purchase/:userId`, so a dropped socket never loses a result.
+- On mount and on every reconnect, it calls `GET /api/orders?userId=`, so a dropped socket never loses a result.
 
 ## 11. Testing strategy
 
@@ -393,7 +395,7 @@ What belongs here, in rough order of value:
 | Spec | What it proves |
 |---|---|
 | `purchase` | The async flow end to end: click → `202` → **queued** state visible → `purchase:result` arrives → confirmed with an order id. The intermediate state is the point; it is the one thing a synchronous design would not have. |
-| `reconnect` | **The critical resilience path.** Drop the socket mid-purchase with `context.setOffline(true)`, restore it, and assert the client re-syncs through `GET /api/purchase/:userId` and lands on the correct terminal state. §5 claims a dropped socket is cosmetic — this is what makes that a verified claim rather than an assertion. |
+| `reconnect` | **The critical resilience path.** Drop the socket mid-purchase with `context.setOffline(true)`, restore it, and assert the client re-syncs through `GET /api/orders?userId=` and lands on the correct terminal state. §5 claims a dropped socket is cosmetic — this is what makes that a verified claim rather than an assertion. |
 | `concurrency` | Several browser contexts race for the last units. One wins, the others see *sold out*. Tests the UI's handling of losing, not the invariant. |
 | `presence` | Open three contexts, assert the viewer count converges to three; close one, assert it falls. The §8 fanout aggregation has no other honest test. |
 | `lifecycle` | *upcoming → active → ended* observed live, without a reload. |

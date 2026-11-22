@@ -51,7 +51,7 @@ export async function publishAttempt(
 /**
  * Fans a batch's outcomes out to every API instance. Not confirmed: a lost
  * result is cosmetic, because the client re-syncs through
- * `GET /api/purchase/:userId` on reconnect (§5), and waiting on confirms here
+ * `GET /api/orders?userId=` on reconnect (§5), and waiting on confirms here
  * would put broker latency between the commit and the user hearing about it.
  */
 export function publishResults(

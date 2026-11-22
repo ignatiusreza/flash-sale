@@ -11,13 +11,15 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 | Method | Path | Returns |
 | --- | --- | --- |
 | `GET` | `/api/sale` | status, coarse availability, window, `serverTime` — served from memory, no I/O |
-| `POST` | `/api/purchase` | `202 queued` once the broker confirms · `409` not started / ended / sold out · `429` · `503` busy |
-| `GET` | `/api/purchase/:userId` | the user's order, or `none` — the reconnect source of truth |
+| `POST` | `/api/orders` | create — `202 queued` once the broker confirms, `Location` → the user's orders · `409` not started / ended / sold out · `429` · `503` busy |
+| `GET` | `/api/orders?userId=` | index, filtered by user — `[]` or the user's one order; `400` without the filter — the reconnect source of truth |
 | `GET` | `/healthz` `/readyz` | live as soon as the process is up; ready only once the sale is loaded |
 
 Interactive docs are served at **`/docs`**, with the OpenAPI document at `/docs/json`. The route schemas generate it, and Fastify compiles the same schemas for validation and response serialization — so documenting the API also makes it marginally faster.
 
-`POST /api/purchase` answers **202, not 200**: the outcome arrives over the socket. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
+Orders are a REST resource with two of the seven conventional actions, `index` and `create`. `new` and `edit` are server-rendered forms a single-page app has no use for, and an order cannot be changed or cancelled once claimed, so there is no `update` or `destroy`. A reconnecting client knows who it is but not its order id, so it lists its orders by user — a filtered `index` that returns zero or one entries. The filter is required: unfiltered, `index` would list every buyer to anyone while there is no authentication. Nothing needs `show` yet; it would be `GET /api/orders/:orderId`.
+
+`POST /api/orders` answers **202 Accepted, not 201 Created**: the order is accepted for creation, and the outcome arrives over the socket. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
 
 ## Vocabulary
 
@@ -25,10 +27,10 @@ Four words, kept distinct in code, the API and the messages:
 
 | Word | Means | In code |
 | --- | --- | --- |
-| **purchase** | the act — what a user does by pressing *Buy now* | `POST /api/purchase`, `purchase()`, `canPurchase`, `purchaseState` (where this user's purchasing stands) |
+| **purchase** | the act — what a user does by pressing *Buy now*, which asks for an order to be created | `purchase()`, `canPurchase`, `purchaseState` (where this user's purchasing stands) |
 | **attempt** | one queued request that a purchase produces; it may or may not succeed | `PurchaseAttempt`, `attemptId`, queue `purchase.attempts` |
 | **result** | the worker's decision on an attempt | `PurchaseResult`, `purchase:result`; `confirmed`, `already_purchased`, `sold_out`, `not_started`, `ended` |
-| **order** | the row a successful attempt leaves behind — the only durable proof of a sale | `orders` table, `orderId`, `findOrder` |
+| **order** | the row a successful attempt leaves behind — the only durable proof of a sale | `/api/orders`, `orders` table, `orderId`, `findOrder` |
 
 *Buy* is the button's wording, not a term in the code.
 

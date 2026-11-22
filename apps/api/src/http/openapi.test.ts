@@ -34,8 +34,7 @@ describe('OpenAPI document', () => {
     const spec = app.swagger();
 
     expect(Object.keys(spec.paths ?? {}).sort()).toEqual([
-      '/api/purchase',
-      '/api/purchase/{userId}',
+      '/api/orders',
       '/api/sale',
       '/healthz',
       '/readyz',
@@ -45,11 +44,11 @@ describe('OpenAPI document', () => {
   it('documents the outcomes a client has to handle, not just the happy path', async () => {
     app = await server();
     await app.ready();
-    const purchase = app.swagger().paths?.['/api/purchase']?.post;
+    const create = app.swagger().paths?.['/api/orders']?.post;
 
-    expect(Object.keys(purchase?.responses ?? {}).sort()).toEqual(['202', '409', '429', '503']);
+    expect(Object.keys(create?.responses ?? {}).sort()).toEqual(['202', '409', '429', '503']);
     // The three reasons an attempt is refused before it reaches the queue.
-    const conflict = purchase?.responses?.['409'];
+    const conflict = create?.responses?.['409'];
     const status = (
       conflict as {
         content?: Record<string, { schema?: { properties?: Record<string, { enum?: string[] }> } }>;
@@ -95,7 +94,7 @@ describe('response schemas', () => {
   it('keeps the attemptId on a queued purchase', async () => {
     app = await server();
     const body = (
-      await app.inject({ method: 'POST', url: '/api/purchase', payload: { userId: 'alice' } })
+      await app.inject({ method: 'POST', url: '/api/orders', payload: { userId: 'alice' } })
     ).json();
 
     expect(body.status).toBe('queued');

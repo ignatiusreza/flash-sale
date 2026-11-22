@@ -7,10 +7,10 @@ import { applyResponse, type PurchaseState } from './purchase-state.js';
  */
 export async function findOrder(userId: string): Promise<string | undefined> {
   try {
-    const response = await fetch(`/api/purchase/${encodeURIComponent(userId)}`);
+    const response = await fetch(`/api/orders?userId=${encodeURIComponent(userId)}`);
     if (!response.ok) return undefined;
-    const body = (await response.json()) as { status?: string; orderId?: string };
-    return body.status === 'confirmed' ? body.orderId : undefined;
+    const orders = (await response.json()) as { orderId: string }[];
+    return orders[0]?.orderId;
   } catch {
     return undefined;
   }
@@ -19,7 +19,7 @@ export async function findOrder(userId: string): Promise<string | undefined> {
 /** Submits an attempt and maps the immediate response; the outcome arrives over the socket. */
 export async function submitPurchase(userId: string): Promise<PurchaseState> {
   try {
-    const response = await fetch('/api/purchase', {
+    const response = await fetch('/api/orders', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ userId }),
