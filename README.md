@@ -114,7 +114,6 @@ There are only two application services, `api` and `worker`. The API serves the 
 | `WEB_ROOT` | — | directory of the built SPA; unset, the process is a pure API |
 | `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
 | `APP_ENV` | `production` | whose data: names the RabbitMQ queue and exchange — see [Environments](#environments) |
-| `ENABLE_TEST_ENDPOINTS` | `false` | registers the E2E reset endpoint; never in a deployed environment |
 | `SEED_STOCK` | `100` | units in the seeded sale |
 | `SEED_DURATION_MINUTES` | `60` | how long it stays open |
 | `SEED_RESET` | — | `1` to recreate the sale and drop its orders |
@@ -179,7 +178,7 @@ pnpm test:e2e
 
 Playwright starts its own stack and tears it down: it builds the app, then runs the API (serving the built SPA, as in production) on `:3100` and a worker, as `APP_ENV=e2e` — the same local services as `pnpm dev`, but its own database and queues (see [Environments](#environments)), so it runs happily beside a `pnpm dev`. It takes service locations from the shell only, never from `.env`: a `DATABASE_URL` there names your development database, and the suite's reset endpoint would wipe its orders.
 
-Each spec seeds its own sale through `POST /api/test/sale`, which exists only when the API runs with `ENABLE_TEST_ENDPOINTS=true` — the E2E server sets it, no deployed environment ever should. Specs run one at a time, because there is one sale; there are no retries, because a flaky suite trains people to re-run red builds. When a spec fails, the Socket.IO frames it saw are attached to the report, which separates "the server never sent it" from "the page ignored it".
+Each spec seeds its own sale through `POST /api/test/sale`, which exists only when the API runs as `APP_ENV=e2e` — not in development, whose data is your work, and never in production. Specs run one at a time, because there is one sale; there are no retries, because a flaky suite trains people to re-run red builds. When a spec fails, the Socket.IO frames it saw are attached to the report, which separates "the server never sent it" from "the page ignored it".
 
 | Spec | Proves |
 | --- | --- |

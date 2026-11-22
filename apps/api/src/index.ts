@@ -8,7 +8,7 @@ import {
 import amqp from 'amqplib';
 import pg from 'pg';
 
-import { loadConfig } from './config.js';
+import { loadConfig, testEndpointsEnabled } from './config.js';
 import { createGateway } from './realtime/gateway.js';
 import { SaleCache } from './sale/cache.js';
 import { buildServer } from './server.js';
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     logger: true,
     ...(config.WEB_ROOT ? { webRoot: config.WEB_ROOT } : {}),
     trustProxy: config.TRUST_PROXY,
-    enableTestEndpoints: config.ENABLE_TEST_ENDPOINTS,
+    enableTestEndpoints: testEndpointsEnabled(config),
   });
 
   // Listen before attaching the gateway: Socket.IO needs the underlying server,

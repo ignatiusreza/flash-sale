@@ -7,8 +7,9 @@
  *
  * It is `APP_ENV=e2e`: its own database and its own RabbitMQ queue and
  * exchange, on its own port, so it runs beside `pnpm dev` on the same services
- * without either touching the other's data. The API registers the test-only
- * reset endpoint (`ENABLE_TEST_ENDPOINTS`), which wipes the sale's orders.
+ * without either touching the other's data. Being the E2E environment is also
+ * what makes the API register the test-only reset endpoint, which wipes the
+ * sale's orders.
  */
 import { supervisor } from './lib/stack.mjs';
 
@@ -42,6 +43,6 @@ e2e.start(
   'api',
   'node',
   ['apps/api/dist/index.js'],
-  { ...env, PORT: String(PORT), WEB_ROOT: 'apps/web/dist', ENABLE_TEST_ENDPOINTS: 'true' },
+  { ...env, PORT: String(PORT), WEB_ROOT: 'apps/web/dist' },
   sameGroup,
 );

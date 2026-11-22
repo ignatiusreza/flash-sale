@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { loadConfig } from './config.js';
+import { loadConfig, testEndpointsEnabled } from './config.js';
 
 const required = {
   DATABASE_URL: 'postgres://localhost/flashsale',
@@ -30,5 +30,22 @@ describe('TRUST_PROXY', () => {
   // one would leave the operator believing they had configured something.
   it('refuses a hop count rather than silently trusting nothing', () => {
     expect(() => trustProxy('1')).toThrow(/hop count/);
+  });
+});
+
+// The reset endpoint wipes orders, so it must exist in exactly one environment.
+describe('test endpoints', () => {
+  const enabledIn = (APP_ENV?: string) =>
+    testEndpointsEnabled(loadConfig({ ...required, ...(APP_ENV ? { APP_ENV } : {}) }));
+
+  it('exist only in the E2E environment', () => {
+    expect(enabledIn('e2e')).toBe(true);
+  });
+
+  it('never exist anywhere else — including with nothing set', () => {
+    expect(enabledIn()).toBe(false);
+    expect(enabledIn('production')).toBe(false);
+    expect(enabledIn('development')).toBe(false);
+    expect(enabledIn('test')).toBe(false);
   });
 });

@@ -407,7 +407,7 @@ Three rules keep this layer from becoming a liability:
 
 - **It tests the experience, never the invariant.** The oversell proof stays in integration and stress, where 20 000 attempts cost nothing. Twenty thousand browsers is not a test, it is a denial of service against your own CI. A race between five contexts for two units is legitimate E2E; a race between twenty thousand is not.
 - **No fixed sleeps, ever.** WebSocket arrival time is nondeterministic, so every assertion goes through Playwright's retrying `expect`. A flaky E2E suite is worse than none, because it trains people to re-run red builds.
-- **Each spec seeds its own sale.** A test-only reset endpoint behind `ENABLE_TEST_ENDPOINTS`, never enabled in a deployed environment, gives each spec a fresh sale with known stock and window. Tests that share mutable state across a queue and a worker will interfere in ways that look like real bugs.
+- **Each spec seeds its own sale.** A test-only reset endpoint, registered only when the API runs as `APP_ENV=e2e` and so never in a deployed environment, gives each spec a fresh sale with known stock and window. Tests that share mutable state across a queue and a worker will interfere in ways that look like real bugs.
 
 Playwright can also observe the socket directly — `page.on('websocket', ws => ws.on('framereceived', …))` — which is worth wiring into the fixtures as a diagnostic. When a UI assertion fails it immediately separates "the server never sent it" from "the client ignored it", and those have very different fixes. Socket.IO frames carry Engine.IO encoding, so the UI state stays the primary assertion and frames are for triage.
 

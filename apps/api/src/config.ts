@@ -24,11 +24,6 @@ const schema = z.object({
    */
   WEB_ROOT: z.string().min(1).optional(),
   /**
-   * Registers `POST /api/test/sale`, which wipes and reseeds the sale. For the
-   * E2E suite only; never set in a deployed environment.
-   */
-  ENABLE_TEST_ENDPOINTS: z.stringbool().default(false),
-  /**
    * Which peers may be believed when they send `X-Forwarded-For`. This decides
    * what `request.ip` is, and `request.ip` is what the rate limiter keys on
    * (docs/PLAN.md §6), so it is a security setting rather than a formality.
@@ -60,6 +55,15 @@ const schema = z.object({
 });
 
 export type Config = z.infer<typeof schema>;
+
+/**
+ * Whether to register `POST /api/test/sale`, which wipes the sale's orders and
+ * reseeds it for the E2E suite. Only in the E2E environment: not development,
+ * whose data is someone's work, and never production.
+ */
+export function testEndpointsEnabled(config: Pick<Config, 'APP_ENV'>): boolean {
+  return config.APP_ENV === 'e2e';
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.safeParse(env);

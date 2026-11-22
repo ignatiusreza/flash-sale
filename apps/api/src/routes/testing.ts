@@ -22,7 +22,7 @@ const resetSchema = {
 /**
  * E2E-only: wipes the sale's orders and reseeds it, so each spec starts from a
  * sale with known stock and window (docs/PLAN.md §11). Registered only when
- * `ENABLE_TEST_ENDPOINTS` is set, which no deployed environment does.
+ * the API runs as `APP_ENV=e2e` (`testEndpointsEnabled` in config.ts).
  */
 export const testRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) => {
   app.post<{ Body: { stock: number; startsInMs: number; durationMs: number } }>(
