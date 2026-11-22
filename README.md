@@ -155,7 +155,7 @@ Each is argued at length, with measurements, in `docs/PLAN.md`.
 | Traffic beyond capacity | The queue is bounded; past it the API answers `503` immediately instead of queueing without limit. Measured: every accepted attempt still became an order. |
 | A broker node dies | (Production topology.) The quorum queue elects a new leader within seconds; a confirm means a majority already held the message. |
 | Connection to the broker lost | The API and worker exit and their restart policy brings them back; unacked attempts are redelivered and clients re-sync. Verified by restarting RabbitMQ under the Compose stack. |
-| An attempt that can never be claimed | A malformed message, or one redelivered past the queue's delivery limit of 20 — 20 worker deaths holding it — goes to the `<queue>.dead` queue for an operator, never nowhere. |
+| An attempt that can never be claimed | Goes to the `<queue>.dead` queue for an operator, never nowhere: a malformed message; one redelivered past the delivery limit of 20 (20 worker deaths holding it); or one carrying data Postgres refuses, such as a NUL byte, whose batch is split until it is alone so the others are still claimed. The API also refuses a `userId` with control characters before it is queued. |
 
 The property under all of it: **nobody is told "confirmed" unless the order is committed.** An outage is honest; a false confirmation is not, and the design trades availability for that (PLAN §5).
 
@@ -169,7 +169,7 @@ The property under all of it: **nobody is told "confirmed" unless the order is c
 
 | Layer | What | Run |
 | --- | --- | --- |
-| Unit + integration | 183 tests. The invariants through the real queue and worker: 2 000 attempts for 50 units, a quarter repeats, yield exactly 50 orders, one answer per attempt, and **confirmed results equal to the orders**; a worker **killed between commit and ack** has its batch replayed as the same order, stock moved once. The claim alone under concurrency: **never oversells** (20 000 attempts against 1 000 units) and **never grants one buyer two units**. Redelivery, dead-lettering and failure handling against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
+| Unit + integration | 187 tests. The invariants through the real queue and worker: 2 000 attempts for 50 units, a quarter repeats, yield exactly 50 orders, one answer per attempt, and **confirmed results equal to the orders**; a worker **killed between commit and ack** has its batch replayed as the same order, stock moved once. The claim alone under concurrency: **never oversells** (20 000 attempts against 1 000 units) and **never grants one buyer two units**. Redelivery, dead-lettering and failure handling against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
 | End to end | 20 Playwright specs against the built app | `pnpm test:e2e` |
 | Stress | k6 scenarios, then the invariants checked in Postgres | `pnpm stress <scenario>` |
 

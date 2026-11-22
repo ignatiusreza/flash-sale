@@ -14,6 +14,7 @@ import type { ChannelModel, ConfirmChannel } from 'amqplib';
 import type pg from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { isBadAttemptData } from './failures.js';
 import { createPool } from '../db/pool.js';
 import { handleBatch } from './handler.js';
 import { migrate } from '../db/migrate.js';
@@ -372,6 +373,83 @@ describeQueue('queue wiring', () => {
         }
       }
     }, 60_000);
+  });
+
+  describe('an attempt the claim can never store', () => {
+    it('costs only itself: dead-lettered, while the rest of its batch is claimed', async () => {
+      // The reviewer's reproduction: one attempt Postgres cannot store failed
+      // the whole statement, and the batch was retried in place for good —
+      // no order for anyone behind it, nothing dead-lettered (issue #17).
+      const received: PurchaseResultsMessage[] = [];
+      const consumer = await startBatchConsumer({
+        channel,
+        queue,
+        flushMs: 20,
+        retryMinMs: 1,
+        retryMaxMs: 2,
+        isPermanent: isBadAttemptData,
+        onError: () => {},
+        handle: async (attempts) => {
+          received.push(await handleBatch(pool, SALE, attempts));
+        },
+      });
+
+      for (const user of ['alice', 'mallory\u0000x', 'bob', 'carol']) {
+        await publishAttempt(channel, queue, attempt(user));
+      }
+      await until(() => received.flatMap((m) => m.results).length === 3, 10_000);
+      await consumer.stop();
+
+      expect(received.flatMap((m) => m.results.map((r) => [r.userId, r.status])).sort()).toEqual([
+        ['alice', 'confirmed'],
+        ['bob', 'confirmed'],
+        ['carol', 'confirmed'],
+      ]);
+      const check = await connection.createChannel();
+      const dead = await check.get(deadLetterQueue, { noAck: true });
+      await check.close();
+      expect(dead && JSON.parse(dead.content.toString()).userId).toBe('mallory\u0000x');
+    });
+
+    it('hands every half back when stopped mid-split, so no later ack swallows one', async () => {
+      // A permanent failure splits the batch; the first half then fails in a
+      // way that will pass, and is retried. Stopping now must return the
+      // untouched second half too, not only the half being retried.
+      for (const user of ['a1', 'bad', 'a2', 'a3']) {
+        await publishAttempt(channel, queue, attempt(user));
+      }
+      let retries = 0;
+      const consumer = await startBatchConsumer({
+        channel,
+        queue,
+        batchMax: 4,
+        flushMs: 20,
+        retryMinMs: 1,
+        retryMaxMs: 2,
+        isPermanent: isBadAttemptData,
+        onError: () => {},
+        handle: async (attempts) => {
+          if (attempts.some((a) => a.userId === 'bad')) {
+            throw Object.assign(new Error('invalid byte sequence'), { code: '22021' });
+          }
+          retries++;
+          throw new Error('database unavailable');
+        },
+      });
+
+      await until(() => retries >= 2);
+      await consumer.stop();
+
+      // A quorum queue's count catches up with its returns, not at once.
+      await expect
+        .poll(async () => {
+          const check = await connection.createChannel();
+          const { messageCount } = await check.checkQueue(queue);
+          await check.close();
+          return messageCount;
+        })
+        .toBe(4);
+    });
   });
 
   describe('nothing accepted is ever dropped', () => {
