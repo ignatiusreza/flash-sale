@@ -1,7 +1,14 @@
 import type { PurchaseResultEvent } from '@flash-sale/core';
 import { describe, expect, it } from 'vitest';
 
-import { applyResponse, applyResult, idle, isBusy, isTerminal } from './purchase-state.js';
+import {
+  applyResponse,
+  applyResult,
+  canPurchase,
+  idle,
+  isBusy,
+  isTerminal,
+} from './purchase-state.js';
 
 const queued = { status: 'queued', attemptId: 'ours' } as const;
 
@@ -102,5 +109,33 @@ describe('state predicates', () => {
     expect(isBusy({ status: 'submitting' })).toBe(true);
     expect(isBusy(queued)).toBe(true);
     expect(isBusy({ status: 'busy' })).toBe(false);
+  });
+});
+
+describe('canPurchase', () => {
+  const open = { status: 'active', availability: 'plenty' } as const;
+
+  it('allows a named user into an open sale with stock', () => {
+    expect(canPurchase(idle, 'alice', open)).toBe(true);
+  });
+
+  it('needs a name', () => {
+    expect(canPurchase(idle, '', open)).toBe(false);
+  });
+
+  it('needs the sale to be open and in stock', () => {
+    expect(canPurchase(idle, 'alice', undefined)).toBe(false);
+    expect(canPurchase(idle, 'alice', { status: 'upcoming' })).toBe(false);
+    expect(canPurchase(idle, 'alice', { status: 'ended' })).toBe(false);
+    expect(canPurchase(idle, 'alice', { status: 'active', availability: 'sold_out' })).toBe(false);
+  });
+
+  // Retrying after `busy` or `failed` is what those states are for, so only
+  // in-flight and settled states block the button.
+  it('blocks while in flight or settled, not after a retryable failure', () => {
+    expect(canPurchase(queued, 'alice', open)).toBe(false);
+    expect(canPurchase({ status: 'held', orderId: 'o1' }, 'alice', open)).toBe(false);
+    expect(canPurchase({ status: 'busy' }, 'alice', open)).toBe(true);
+    expect(canPurchase({ status: 'failed', message: 'x' }, 'alice', open)).toBe(true);
   });
 });

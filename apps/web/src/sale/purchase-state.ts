@@ -1,4 +1,4 @@
-import type { PurchaseResultEvent } from '@flash-sale/core';
+import type { Availability, PurchaseResultEvent, SaleStatus } from '@flash-sale/core';
 
 /**
  * What the page is showing about this user's purchase.
@@ -27,6 +27,24 @@ export function isTerminal(state: PurchaseState): boolean {
 /** True while a click would be pointless or harmful. */
 export function isBusy(state: PurchaseState): boolean {
   return state.status === 'submitting' || state.status === 'queued';
+}
+
+/**
+ * Whether a purchase can be started: someone to purchase for, a sale open
+ * with stock, and nothing in flight or already settled for this user.
+ */
+export function canPurchase(
+  state: PurchaseState,
+  userId: string,
+  sale: { readonly status: SaleStatus; readonly availability?: Availability } | undefined,
+): boolean {
+  return (
+    Boolean(userId) &&
+    sale?.status === 'active' &&
+    sale.availability !== 'sold_out' &&
+    !isBusy(state) &&
+    !isTerminal(state)
+  );
 }
 
 /**
