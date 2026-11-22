@@ -95,6 +95,8 @@ Seeding is idempotent, so restarting never resets stock out from under whatever 
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```
 
+`pnpm test` uses the same local defaults and `.env` as `pnpm dev`, against a separate `flashsale_test` database (created if missing) so a test run never writes into the data you are clicking through. If no URL is set and nothing is listening on the default port, the suites that need that service skip with a warning, so a checkout with no services still runs the unit tests. A URL you set explicitly has to be reachable, or those suites fail.
+
 The Compose services are published on **non-default host ports**, so they cannot clash with a Postgres or RabbitMQ already running on your machine:
 
 | Service | Host | Override |
@@ -149,7 +151,7 @@ docker compose run --build --rm runner pnpm test    # or any other script
 
 **`--build` is not optional.** The image bakes the source at build time, so without it `run` silently reuses the last image and tests your previous edit — which looks exactly like a change that did not work.
 
-`tests/integration/services.test.ts` asserts exactly that — it is skipped on a bare checkout and runs here. The `Dockerfile` also has `api` and `worker` targets that ship production dependencies only; neither has a server to run until phases 2–4.
+`tests/integration/services.test.ts` asserts the services are reachable wherever the suite was pointed. The `Dockerfile` also has `api` and `worker` targets that ship production dependencies only; neither has a server to run until phases 2–4.
 
 ### Or use the devcontainer
 
@@ -199,7 +201,7 @@ Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks
 | `pnpm verify`               | Everything CI runs, in CI's order. Run this before pushing. |
 | `pnpm build`                | `tsc -b` across the project graph, then the web bundle.     |
 | `pnpm typecheck`            | Build graph, test files, and the web app.                   |
-| `pnpm test`                 | Vitest.                                                     |
+| `pnpm test`                 | Vitest, against local services by default (see above).      |
 | `pnpm lint` / `pnpm format` | ESLint / Prettier.                                          |
 | `pnpm licenses:check`       | Fails on any dependency licence outside the allowlist.      |
 | `pnpm clean`                | Removes build output.                                       |
