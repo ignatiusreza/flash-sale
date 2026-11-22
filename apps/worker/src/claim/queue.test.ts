@@ -219,7 +219,7 @@ describeQueue('queue wiring', () => {
       expect(received[0]!.results[0]).toMatchObject({ userId: 'carol', status: 'confirmed' });
     });
 
-    it('consumes no extra stock when a committed batch is replayed', async () => {
+    it('consumes no extra stock when the same attempt arrives twice', async () => {
       const received: PurchaseResultsMessage[] = [];
       const consumer = await startBatchConsumer({
         channel,
@@ -234,7 +234,7 @@ describeQueue('queue wiring', () => {
       await publishAttempt(channel, queue, dave);
       await until(() => received.length === 1);
 
-      // The same attempt arriving twice is what at-least-once delivery means.
+      // A double submit, or a publish the API retried: the same attempt twice.
       await publishAttempt(channel, queue, dave);
       await until(() => received.length === 2);
       await consumer.stop();
@@ -249,6 +249,129 @@ describeQueue('queue wiring', () => {
       expect(rows[0]!.remaining).toBe(9);
       expect(Number(rows[0]!.orders)).toBe(1);
     });
+  });
+
+  describe('a worker dying between commit and ack', () => {
+    it('replays the batch to the next worker: the same order, no extra stock', async () => {
+      // Its own connection, so closing it is the death of this worker alone.
+      const dying = await connectBroker(RABBITMQ_URL!);
+      dying.on('error', () => {});
+      const dyingChannel = await dying.createConfirmChannel();
+      dyingChannel.on('error', () => {});
+
+      let committed: PurchaseResultsMessage | undefined;
+      await startBatchConsumer({
+        channel: dyingChannel,
+        queue,
+        flushMs: 5,
+        onError: () => {},
+        handle: async (attempts) => {
+          committed = await handleBatch(pool, SALE, attempts);
+          // Committed; now gone before the ack. The broker returns the
+          // unacked delivery, and this handler never finishes to ack it.
+          await dying.close();
+          await new Promise(() => {});
+        },
+      });
+
+      await publishAttempt(channel, queue, attempt('erin'));
+      await until(() => committed !== undefined);
+      const original = committed!.results[0]!;
+      expect(original).toMatchObject({ userId: 'erin', status: 'confirmed' });
+
+      const replayed: PurchaseResultsMessage[] = [];
+      const next = await startBatchConsumer({
+        channel,
+        queue,
+        flushMs: 5,
+        handle: async (attempts) => {
+          replayed.push(await handleBatch(pool, SALE, attempts));
+        },
+      });
+      await until(() => replayed.length > 0, 10_000);
+      await next.stop();
+
+      // A success, with the order the first worker committed.
+      expect(replayed[0]!.results[0]).toEqual({
+        attemptId: original.attemptId,
+        userId: 'erin',
+        status: 'already_purchased',
+        orderId: original.orderId,
+      });
+      const { rows } = await pool.query<{ remaining: number; orders: string }>(
+        'SELECT (SELECT remaining FROM sales WHERE id = $1) AS remaining, (SELECT count(*) FROM orders WHERE sale_id = $1)::text AS orders',
+        [SALE],
+      );
+      expect(rows[0]).toEqual({ remaining: 9, orders: '1' });
+    });
+  });
+
+  describe('the invariants, through the queue and the worker', () => {
+    it('sells exactly the stock, once per buyer, and every result matches an order', async () => {
+      // The claim-level invariant tests (claim.test.ts) call the claim
+      // directly; this is the path a purchase takes: published with confirms,
+      // batched, claimed, and announced. A quarter of the attempts are
+      // repeats by a buyer who already tried.
+      const stock = 50;
+      await pool.query('UPDATE sales SET total_stock = $2, remaining = $2 WHERE id = $1', [
+        SALE,
+        stock,
+      ]);
+      const attempts = Array.from({ length: 2_000 }, (_, i) =>
+        attempt(`buyer-${i % 4 === 3 ? i - 1 : i}`),
+      );
+
+      const results: PurchaseResultsMessage['results'][number][] = [];
+      const consumer = await startBatchConsumer({
+        channel,
+        queue,
+        batchMax: 100,
+        flushMs: 5,
+        handle: async (batch) => {
+          results.push(...(await handleBatch(pool, SALE, batch)).results);
+        },
+      });
+      await Promise.all(attempts.map((a) => publishAttempt(channel, queue, a)));
+      await until(() => results.length === attempts.length, 30_000);
+      await consumer.stop();
+
+      const { rows: orders } = await pool.query<{ user_id: string; id: string }>(
+        'SELECT user_id, id FROM orders WHERE sale_id = $1',
+        [SALE],
+      );
+      const { rows: sale } = await pool.query<{ remaining: number }>(
+        'SELECT remaining FROM sales WHERE id = $1',
+        [SALE],
+      );
+
+      // Exactly the stock, nothing left.
+      expect(orders).toHaveLength(stock);
+      expect(sale[0]!.remaining).toBe(0);
+
+      // One result per attempt, none twice.
+      expect(new Set(results.map((r) => r.attemptId)).size).toBe(attempts.length);
+
+      // Every confirmation names a committed order, and every order was
+      // confirmed: the same set, not merely no more of them. Distinct pairs,
+      // because a buyer's repeats in one batch are each told `confirmed`,
+      // with the one order they share.
+      const confirmed = new Set(
+        results.filter((r) => r.status === 'confirmed').map((r) => `${r.userId}:${r.orderId}`),
+      );
+      expect([...confirmed].sort()).toEqual(orders.map((o) => `${o.user_id}:${o.id}`).sort());
+
+      // Nobody holding an order was told anything else, nor given another id.
+      const held = new Map(orders.map((o) => [o.user_id, o.id]));
+      for (const result of results) {
+        const orderId = held.get(result.userId);
+        if (orderId) {
+          expect(['confirmed', 'already_purchased']).toContain(result.status);
+          expect(result.orderId).toBe(orderId);
+        } else {
+          expect(result.status).toBe('sold_out');
+        }
+      }
+    }, 60_000);
   });
 
   describe('nothing accepted is ever dropped', () => {

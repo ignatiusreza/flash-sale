@@ -2,7 +2,7 @@
 
 A flash sale for one limited-stock product, one unit per buyer, built to stay correct and responsive under a stampede: purchases are queued and settled in batches by a single worker, and each buyer learns the outcome over a WebSocket.
 
-On one laptop it holds **10 000 purchase attempts per second**, answers end to end in **34 ms at p99**, and sells **exactly** its stock — 20 000 units to 20 000 distinct buyers under 11.7× oversubscription, checked in the database afterwards.
+On one laptop it holds **10 000 purchase attempts per second** through a sellout and sells **exactly** its stock — 20 000 units, with every confirmation a buyer heard matched to a committed order in the database afterwards. A buyer hears back in **~10 ms** at the median, and under **100 ms at p99 even while the rush runs** — 31–45 ms before it, 51–96 ms during ([stress tests](#stress-tests)).
 
 `docs/REQUIREMENT.md` is the brief. `docs/PLAN.md` is the full design and its reasoning; this README is the summary a reviewer needs, and links into it.
 
@@ -169,7 +169,7 @@ The property under all of it: **nobody is told "confirmed" unless the order is c
 
 | Layer | What | Run |
 | --- | --- | --- |
-| Unit + integration | 178 tests: the claim against a real Postgres, including the two that matter — **never oversells** (20 000 attempts against 1 000 units yields exactly 1 000 orders to 1 000 buyers) and **never grants one buyer two units** (500 concurrent attempts by one buyer yield one order); queue wiring and redelivery against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
+| Unit + integration | 180 tests. The invariants through the real queue and worker: 2 000 attempts for 50 units, a quarter repeats, yield exactly 50 orders, one answer per attempt, and **confirmed results equal to the orders**; a worker **killed between commit and ack** has its batch replayed as the same order, stock moved once. The claim alone under concurrency: **never oversells** (20 000 attempts against 1 000 units) and **never grants one buyer two units**. Redelivery, dead-lettering and failure handling against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
 | End to end | 19 Playwright specs against the built app | `pnpm test:e2e` |
 | Stress | k6 scenarios, then the invariants checked in Postgres | `pnpm stress <scenario>` |
 
@@ -204,21 +204,23 @@ pnpm stress capacity    # exploratory: the ceiling with every attempt queued
 
 Each run builds the app and starts its own stack with **two API instances** — a buyer's socket on one, their `POST` on the other, so every result crosses instances. [k6](https://k6.io) drives the load from Docker, standing in for many clients, each with its own address so the rate limiter sees them as distinct. Afterwards the run checks the invariants **in Postgres** and prints `PASS`/`FAIL` for each, because a load test that only reports throughput proves nothing. Stress is not in CI: sustained load on a shared runner is noise.
 
-**Expected outcome** — every line `PASS`. Measured on one laptop (Ryzen 5 7640U, 12 threads, 30 GB) running k6, both APIs, the worker, Postgres and RabbitMQ together:
+**Expected outcome** — every correctness line `PASS`. Measured on one laptop (Ryzen 5 7640U, 12 threads, 30 GB) running k6, both APIs, the worker, Postgres and RabbitMQ together. `sale` runs three phases: `steady` (300 buyers/s on the socket, before the rush), `rush` (HTTP only, ramped to 10 000/s and held 20 s, a quarter of it repeat buyers) and `probe` (200 buyers/s on the socket, *during* the rush). Each is reported on its own; none is pooled with another. Ranges are across six runs.
 
 | Scenario | Target (PLAN §2.3) | Measured |
 | --- | --- | --- |
-| `sale` — buyers connected over the socket, timed from `POST` to result | p99 < 100 ms | p50 9 ms, p95 25 ms, **p99 35 ms** |
-| `sale` — the rush, ramped to and held at the target rate | ≥ 10 000 attempts/s sustained | **10 000/s held for 20 s**, 0 failed, `POST` p99 22 ms |
-| `sale` — correctness: 20 000 units, 11.7× oversubscribed | no oversell, no double grant | **20 000 orders to 20 000 distinct buyers, stock 0** |
+| `sale` correctness: 20 000 units, 11.9× offered, ~1.35× reaching the queue | no oversell, no double grant, no false answer | **in all six runs:** 20 000 orders, stock 0; every accepted attempt answered exactly once; the confirmed set *equal* to the orders; no buyer told anything but their own outcome |
+| `sale` rush, the rate | ≥ 10 000 attempts/s sustained | **held for 20 s**, 0 dropped, 0 failed; `POST` p99 13–29 ms |
+| `sale` steady, `POST` → result, before the rush | p99 < 100 ms | p50 9–10 ms, p95 23–31 ms, **p99 31–45 ms** |
+| `sale` probe, `POST` → result, *during the rush* | p99 < 100 ms (reported, not gated) | p50 11–16 ms, p95 37–61 ms, **p99 51–96 ms** |
 | `shedding` — worker stopped, 5 000/s against a bound of 2 000 | clean rejection, nothing lost | 47 918 shed with `503`; **all 2 005 accepted became orders**; API memory +41 MB |
 | `capacity` — ramped to 20 000/s offered, stock that never sells out | — | **~18 000/s sustained through the queue**, nothing shed; k6 could not offer more |
 
 **Reading the results:**
 
-- **The rush is held at the API.** Of 233 000 attempts, 208 000 were refused from the in-memory cache once stock was gone; only ~25 000 — the winners, plus those arriving within the cache's one-second refresh — ever reached the queue. Doomed traffic is the cheapest to answer, by design.
-- **The queue path's own ceiling is lower,** but above what this laptop can offer: ~18 000 attempts/s when every attempt wins, on hardware shared with everything else. At batches of 100 the same run topped out at ~8 000/s and shed 241 000 attempts; at 500 it shed none. Past its ceiling the system degrades by shedding with `503`, not by growing latency or losing purchases — `shedding` proves both halves.
-- **Batch size does not cost latency.** Alternating runs at 100 and 500 gave the same result p99 (32–40 ms and 35–42 ms): only ~25 000 attempts reach the queue over the whole run, a few per 5 ms flush, so neither size is ever reached.
+- **The correctness checks are the strong ones.** The orchestrator listens to every result the worker announces, the way an API instance does, and holds each against Postgres: the set of confirmed `(buyer, order)` pairs must *equal* the orders, every accepted attempt must get exactly one answer, and a buyer holding an order must never hear anything else. Earlier versions checked `confirmed ≤ orders` and `buyers = orders`, which the `UNIQUE` constraint already guarantees and so could not fail.
+- **The rush is held at the API, and the claim sees little of it.** 11.9× stock is *offered*, but once stock is gone the in-memory cache refuses the rest: ~1.35× stock reaches the queue — the winners, plus those arriving within the cache's one-second refresh. That is the design, but it also means the queue and claim are oversubscribed ~1.35×, not 12×.
+- **The rush roughly doubles the tail, and stays under target.** A buyer waiting while 10 000 attempts/s arrive hears back in 51–96 ms at p99, against 31–45 ms when it is quiet; the median barely moves. The machine has to be quiet for these to hold: an earlier set of runs, sharing it with an unrelated cluster using two of its twelve cores, saw single phases' p99 past half a second — and the same correctness results.
+- **The queue path's own ceiling is lower,** but above what this laptop can offer: ~18 000 attempts/s when every attempt wins. At batches of 100 the same run topped out at ~8 000/s and shed 241 000 attempts; at 500 it shed none. Past its ceiling the system degrades by shedding with `503`, not by losing purchases — `shedding` proves it.
 - **The queue's bound is approximate** with two instances publishing at once (2 005 accepted for 2 000). What matters holds: it stops growing, and nothing accepted is lost.
 - **The first run found a real bug.** The worker drained at ~4 000 claims/s against ~35 000 for the claim alone: Nagle's algorithm held each batch's ack ~20 ms behind its result publish. With it off (`connectBroker`), the same drain runs at ~33 000/s.
 

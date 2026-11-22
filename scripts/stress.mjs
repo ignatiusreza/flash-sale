@@ -40,6 +40,7 @@ const SCENARIOS = {
         STEADY_RATE: process.env.STRESS_STEADY_RATE,
         RUSH_RATE: String(this.rushRate),
         RUSH_HOLD_S: String(this.rushHoldS),
+        PROBE_RATE: process.env.STRESS_PROBE_RATE,
       };
     },
     check: checkSale,
@@ -81,10 +82,10 @@ await stress.run('pnpm', ['-s', '--filter', '@flash-sale/worker', 'migrate'], en
 const fromWorker = createRequire(path.join(ROOT, 'apps/worker/package.json'));
 const pg = fromWorker('pg');
 const amqp = fromWorker('amqplib');
-const { topologyNames } = await import(
+const { subscribeToEvents, topologyNames } = await import(
   pathToFileURL(fromWorker.resolve('@flash-sale/messaging')).href
 );
-const { queue } = topologyNames('stress');
+const { queue, exchange } = topologyNames('stress');
 
 // A clean queue: leftovers from an aborted run would be claimed into this
 // sale, and a different bound cannot be declared over an existing queue.
@@ -125,6 +126,15 @@ const bases = PORTS.map((port) => `http://localhost:${port}`).join(',');
 mkdirSync(OUT, { recursive: true });
 const rssBefore = apis.map(rssOf);
 
+// Every result the worker announces, heard the way an API instance hears it,
+// so the checks can hold each one against Postgres rather than count k6's.
+// Results are published unconfirmed — a lost one is recovered by the client's
+// order lookup — but nothing here loses them, so each must arrive.
+const results = [];
+await subscribeToEvents(await broker.createChannel(), exchange, {
+  onResults: (message) => results.push(...message.results),
+});
+
 stress.say(`running k6 (${name})…`);
 const k6Passed = await stress
   .run('docker', [
@@ -155,7 +165,13 @@ const k6Passed = await stress
 const summary = JSON.parse(readFileSync(path.join(OUT, 'summary.json'), 'utf8'));
 const verdicts = [
   { name: 'k6 thresholds', pass: k6Passed },
-  ...(await scenario.check({ summary, rssBefore, rssAfter: apis.map(rssOf), startWorker })),
+  ...(await scenario.check({
+    summary,
+    results,
+    rssBefore,
+    rssAfter: apis.map(rssOf),
+    startWorker,
+  })),
 ];
 
 report(summary, verdicts);
@@ -164,11 +180,17 @@ await stress.shutdown(verdicts.every((verdict) => verdict.pass) ? 0 : 1);
 
 // ---------------------------------------------------------------------------
 
-/** The oversubscribed sale: stock sold exactly, to distinct users, once. */
-async function checkSale({ summary }) {
+/**
+ * The oversubscribed sale: stock sold exactly, and every result the worker
+ * announced held against the orders in Postgres — not merely counted.
+ */
+async function checkSale({ summary, results }) {
   await untilQueueEmpty();
-  const { orders, buyers, remaining } = await ledger();
-  const confirmed = count(summary, 'results_confirmed');
+  const accepted = count(summary, 'attempts_accepted');
+  // The last batch's results follow its commit by a moment.
+  await until(async () => results.length >= accepted, 10_000).catch(() => {});
+  const { orders, remaining } = await ledger();
+  const held = await heldOrders();
 
   // The rush ramps from 1 000/s to the target over 5 s, then holds it. Every
   // planned attempt sent — k6 drops what it cannot start on time — means the
@@ -180,23 +202,44 @@ async function checkSale({ summary }) {
   const offered = ['accepted', 'refused', 'limited', 'shed', 'failed']
     .map((outcome) => count(summary, `attempts_${outcome}`))
     .reduce((sum, n) => sum + n, 0);
+  stress.say(
+    `oversubscription: ${(offered / scenario.stock).toFixed(1)}× stock offered, ` +
+      `${(accepted / scenario.stock).toFixed(2)}× reached the queue (the rest refused from cache)`,
+  );
+
+  const answered = new Set(results.map((result) => result.attemptId));
+  // Distinct pairs: a buyer's repeats in one batch are each told `confirmed`,
+  // with the one order they share.
+  const confirmed = new Set(
+    results.filter((r) => r.status === 'confirmed').map((r) => `${r.userId}:${r.orderId}`),
+  );
+  const ordersSet = new Set([...held].map(([userId, orderId]) => `${userId}:${orderId}`));
+  const sameSet =
+    confirmed.size === ordersSet.size && [...confirmed].every((pair) => ordersSet.has(pair));
+  // A holder must only ever hear of their own order; anyone else, sold out.
+  const wrong = results.filter((result) => {
+    const orderId = held.get(result.userId);
+    return orderId
+      ? !['confirmed', 'already_purchased'].includes(result.status) || result.orderId !== orderId
+      : result.status !== 'sold_out';
+  }).length;
 
   return [
     {
       name: `rush held ${rushRate}/s for ${rushHoldS} s (${sent} of ${Math.round(planned)} sent)`,
       pass: sent >= planned * 0.99,
     },
-    {
-      name: `oversubscribed (${(offered / scenario.stock).toFixed(1)}× stock attempted)`,
-      pass: offered > scenario.stock * 2,
-    },
     { name: `orders = stock (${orders} of ${scenario.stock})`, pass: orders === scenario.stock },
-    { name: `one order per buyer (${buyers} buyers)`, pass: buyers === orders },
     { name: `remaining = 0 (${remaining})`, pass: remaining === 0 },
     {
-      name: `every confirmed result is a committed order (${confirmed} ≤ ${orders})`,
-      pass: confirmed <= orders,
+      name: `every accepted attempt answered exactly once (${answered.size} of ${accepted}, ${results.length} results)`,
+      pass: answered.size === accepted && results.length === accepted,
     },
+    {
+      name: `confirmed = orders, the same set (${confirmed.size} confirmed, ${ordersSet.size} orders)`,
+      pass: sameSet,
+    },
+    { name: `no buyer told anything but their own outcome (${wrong} wrong)`, pass: wrong === 0 },
   ];
 }
 
@@ -238,13 +281,24 @@ async function checkShedding({ summary, rssBefore, rssAfter, startWorker }) {
   ];
 }
 
+/** Each buyer's order, by user id. */
+async function heldOrders() {
+  const client = new pg.Client({ connectionString: env.DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query("SELECT user_id, id FROM orders WHERE sale_id = 'flash'");
+    return new Map(rows.map((row) => [row.user_id, row.id]));
+  } finally {
+    await client.end();
+  }
+}
+
 async function ledger() {
   const client = new pg.Client({ connectionString: env.DATABASE_URL });
   await client.connect();
   try {
     const { rows } = await client.query(
       `SELECT (SELECT count(*)::int FROM orders WHERE sale_id = 'flash') AS orders,
-              (SELECT count(DISTINCT user_id)::int FROM orders WHERE sale_id = 'flash') AS buyers,
               (SELECT remaining FROM sales WHERE id = 'flash') AS remaining`,
     );
     return rows[0];
@@ -303,16 +357,20 @@ function report(summary, verdicts) {
   );
   stress.say(`requests  ${n('http_reqs')}  dropped iterations ${n('dropped_iterations')}`);
   // Per phase where there are phases: an average across a gap means nothing.
-  for (const phase of ['steady', 'rush']) {
+  // A quiet phase's p99 is not the rush's, so nothing is pooled across them.
+  const latency = (metric) =>
+    `p50 ${ms(metric, 'p(50)')} ms  p95 ${ms(metric, 'p(95)')} ms  p99 ${ms(metric, 'p(99)')} ms`;
+  for (const phase of ['steady', 'rush', 'probe']) {
     const sent = n(`http_reqs{scenario:${phase}}`);
-    if (sent > 0) stress.say(`  ${phase.padEnd(7)} ${sent} requests`);
+    if (sent === 0) continue;
+    stress.say(`${phase.padEnd(7)}   ${sent} requests`);
+    if (m[`http_req_duration{scenario:${phase}}`]) {
+      stress.say(`  POST    ${latency(`http_req_duration{scenario:${phase}}`)}`);
+    }
+    if (m[`result_latency{scenario:${phase}}`]) {
+      stress.say(`  result  ${latency(`result_latency{scenario:${phase}}`)}`);
+    }
   }
-  stress.say(
-    `POST      p50 ${ms('http_req_duration', 'p(50)')} ms  p95 ${ms('http_req_duration', 'p(95)')} ms  p99 ${ms('http_req_duration', 'p(99)')} ms`,
-  );
-  stress.say(
-    `result    p50 ${ms('result_latency', 'p(50)')} ms  p95 ${ms('result_latency', 'p(95)')} ms  p99 ${ms('result_latency', 'p(99)')} ms`,
-  );
   stress.say('');
   for (const verdict of verdicts) stress.say(`${verdict.pass ? 'PASS' : 'FAIL'}  ${verdict.name}`);
 }

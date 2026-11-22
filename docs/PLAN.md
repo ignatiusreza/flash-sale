@@ -405,7 +405,7 @@ Deliberately small — the brief asks for a demonstration, not a storefront. Vit
 
 **The whole suite runs under a deliberately non-UTC `TZ`** — something with an awkward offset and DST, say `TZ=America/St_Johns` or `Pacific/Chatham`. A test suite that only passes in UTC cannot catch code that accidentally depends on the process's local zone, which is the exact bug §9.1 exists to prevent. CI runs it both ways: once in UTC, once shifted.
 
-**Integration (Vitest against real RabbitMQ and Postgres via docker-compose).** The claim statement, worker batching, consumer failover, and — importantly — **redelivery idempotency**: ack a message only after commit, kill the worker between the two, and assert the redelivered message produces no second order.
+**Integration (Vitest against real RabbitMQ and Postgres).** The claim statement, worker batching, consumer failover, and — importantly — **redelivery idempotency**: ack a message only after commit, kill the worker between the two, and assert the redelivered message produces no second order.
 
 **The two decisive tests**, run through the full stack rather than against the database alone:
 
@@ -413,6 +413,13 @@ Deliberately small — the brief asks for a demonstration, not a storefront. Vit
 2. *No double-grant.* 1000 concurrent attempts from **one** user. Assert exactly one order and `remaining` decremented by exactly one.
 
 Both already hold at the SQL layer — `prototype/postgres-claim/` demonstrates 20 000 attempts producing exactly 1000 orders — so the integration versions are testing the queue and worker wiring, not the claim itself.
+
+*As built, revised after review (issue #11).* The two tests that shipped as "decisive" (`claim.test.ts`) call the claim concurrently against Postgres: they exercise the row lock and the `UNIQUE` constraint, not the queue and worker, and the redelivery test published one attempt twice rather than killing a worker. Both now exist as described, in `queue.test.ts`:
+
+- *Through the queue and worker:* 2 000 attempts for 50 units, a quarter of them repeat buyers, published with confirms, batched and claimed. Exactly 50 orders and nothing left; one result per attempt; the confirmed `(buyer, order)` pairs *equal* to the orders — the returned-to-clients half this section asks for; and no holder told anything but their own order.
+- *Commit, then die before the ack:* a worker on its own connection commits a batch, then the connection closes before it acks. The next worker receives the redelivery and answers `already_purchased` with the *same* order id; stock moved once.
+
+The claim-level pair stays, as the fast test of the statement itself. `pnpm stress sale` repeats the returned-to-clients check at load (§11, Stress).
 
 **End-to-end (Playwright, against the full docker-compose stack).** The third layer, and the only one that can see what this design is actually unusual for: a purchase that resolves over a WebSocket rather than in the HTTP response. Integration tests prove the queue and the claim are correct; they cannot prove the user ever finds out.
 
@@ -454,7 +461,9 @@ The layer earned its place on its first run, against code that had passed every 
 
 **Load shedding is a test case, not an afterthought.** Drive past the queue bound and assert the API returns `503` cleanly, memory stays flat, and no attempt is silently dropped.
 
-**As built (phase 7).** `pnpm stress sale|shedding|capacity`, k6 from Docker against its own `APP_ENV=stress` stack with two API instances — a buyer's socket on one, their `POST` on the other, so results cross the fanout. The invariants are checked in Postgres afterwards. Measured on one laptop running everything: end-to-end p99 34 ms; 10 000 attempts/s held for 20 s against 20 000 units, 11.7× oversubscribed, with exactly 20 000 orders to distinct buyers; at the bound, every overflow shed with `503` and every accepted attempt an order. The rush is held at the API — 208 000 of 233 000 attempts refused from cache after sellout — while the queue path alone sustains ~8 600/s here, degrading by shedding rather than by latency. The README has the table and the reading of it.
+**As built (phase 7).** `pnpm stress sale|shedding|capacity`, k6 from Docker against its own `APP_ENV=stress` stack with two API instances — a buyer's socket on one, their `POST` on the other, so results cross the fanout. The invariants are checked in Postgres afterwards. Measured on one laptop running everything: 10 000 attempts/s held for 20 s against 20 000 units, with exactly 20 000 orders; at the bound, every overflow shed with `503` and every accepted attempt an order. The README has the table and the reading of it.
+
+*Revised after review (issue #11).* This first reported "end-to-end p99 34 ms" beside the 10 000/s as if measured together; the p99 came from a 300/s phase that ended before the rush began. "11.7× oversubscribed" was the offer — the cache refuses most of it, so the queue and claim saw ~1.35× stock. And the run checked `confirmed ≤ orders` and `buyers = orders`, the second guaranteed by `UNIQUE` and so unable to fail. Now: a `probe` phase times socket buyers *during* the rush — p99 51–96 ms, against 31–45 ms before it — every phase is reported on its own, a quarter of the rush are repeat buyers, and the orchestrator hears every result the worker announces and holds each against Postgres — the confirmed set equal to the orders, every accepted attempt answered exactly once, no holder told anything but their own order. The queue path sustains ~18 000/s at batches of 500 (§16 q4), not the ~8 600/s first measured at 100.
 
 Two thresholds were loosened after measuring, both stated where they are set: the queue bound is not exact with concurrent publishers (50 over 50 000), and a rush counts as held with under 1% of planned arrivals dropped by k6, since a shared laptop always drops a handful.
 
