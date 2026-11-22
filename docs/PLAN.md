@@ -244,8 +244,9 @@ Four conclusions drive the rest of the design:
 |---|---|---|
 | API instance dies | Sockets drop. Client reconnects to another instance and re-syncs via `GET /api/orders?userId=`. An already-queued attempt still gets processed; the result is waiting. | None |
 | Worker dies mid-batch | Uncommitted transaction rolls back; messages were never acked, so RabbitMQ redelivers them to the newly promoted consumer. | None |
-| Worker dies after commit, before ack | Redelivery re-runs the claim; `ON CONFLICT DO NOTHING` makes it a no-op and the result is re-published. Idempotent. | None |
-| Postgres down | Worker stops acking; the queue backs up to its bound, then the API sheds load with `503`. No incorrect answers are given. | Degraded, self-healing |
+| Worker dies after commit, before ack | Redelivery re-runs the claim; `ON CONFLICT DO NOTHING` makes it a no-op, and the buyer's result is published again, as `already_purchased`. Idempotent. | None |
+| Postgres down | Worker holds its batch unacked and retries it with backoff; the queue backs up to its bound, then the API sheds load with `503`. No incorrect answers are given. | Degraded, self-healing |
+| Connection to the broker lost | API and worker exit; their supervisor restarts them. Unacked attempts are redelivered, clients reconnect and re-sync. | Brief, self-healing |
 | One broker node dies | Quorum queue elects a new leader from the surviving replicas; publishes fail for the few seconds that takes, then resume. Committed messages survive, because a confirm means a majority already has them. | Brief, self-healing |
 | Broker cluster loses its majority | Queues become unavailable — quorum queues choose consistency over availability. No attempts accepted; API returns `503`. | Outage, correct |
 | Result message lost | User's socket shows nothing; the reconnect/poll path resolves it from Postgres. | Cosmetic |
@@ -256,6 +257,9 @@ Required for the above to hold:
 - **Publisher confirms** on the API side. Without them a "published" attempt can vanish and the user waits forever for a result that will never come.
 - **Persistent messages** on a durable queue.
 - **Bounded queue** via `x-max-length` with `overflow: reject-publish`, so saturation becomes a clean `503` rather than unbounded memory growth and unbounded latency.
+- **A failing claim is retried in place, never requeued.** *Revised after review (issue #11).* The first worker nacked a failed batch back onto the queue at once. On RabbitMQ 4.2 each requeue counts as a delivery, a quorum queue drops a message past 20 unless it has somewhere to dead-letter, and nothing set one — so a database outage cycled every accepted attempt into nothing within seconds while the API kept answering `202`. RabbitMQ 4.4 no longer counts an explicit requeue (it reports `x-acquired-count` instead), so there the same outage spun the queue at thousands of redeliveries a second; measured, 21 deliveries then gone on 4.2.5 against ~3 000 in 3 s and still queued on 4.4.1. The worker now holds the batch and retries it with backoff (100 ms doubling to 10 s); a delivery is spent only when a worker dies holding it. Held, the batch also keeps its place: a returned message goes back to the *front* of the queue (measured on 4.2.5 and 4.4.1), but the broker does not recall what it has already prefetched to the worker, so handing a batch back let the batch delivered behind it be claimed first. Each batch is also capped at `CLAIM_BATCH_MAX` now; deliveries arriving while one committed or retried used to join the next batch wholesale, up to the whole prefetch.
+- **Dead-lettering, at-least-once,** to `<queue>.dead`, for a malformed message or one past the delivery limit, so nothing accepted can disappear without a trace.
+- **Crash-only recovery from broker loss.** A lost connection or channel exits the process and its restart policy brings it back; Compose runs two workers, so a standby is there to be promoted.
 
 ### 5.1 Broker topology
 

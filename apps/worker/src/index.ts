@@ -1,6 +1,7 @@
 import {
-  assertTopology,
   connectBroker,
+  declareTopology,
+  onBrokerLost,
   publishResults,
   ROUTING_KEY_RESULTS,
   startBatchConsumer,
@@ -28,13 +29,17 @@ async function main(): Promise<void> {
   await migrate(pool, (message) => console.warn(message));
 
   const connection = await connectBroker(rabbitUrl);
-  const channel = await connection.createConfirmChannel();
   // Must match the API's, or declaring the queue fails: see QUEUE_MAX_LENGTH
   // in apps/api/src/config.ts.
   const maxLength = Number(process.env.QUEUE_MAX_LENGTH) || undefined;
-  const { queue, exchange } = await assertTopology(channel, {
+  const { queue, exchange } = await declareTopology(connection, {
     environment,
     ...(maxLength ? { maxLength } : {}),
+  });
+  const channel = await connection.createConfirmChannel();
+  const releaseBroker = onBrokerLost(connection, [channel], (reason) => {
+    console.error(`${reason}; exiting for a restart`);
+    process.exit(1);
   });
 
   const batchMax = Number(process.env.CLAIM_BATCH_MAX) || undefined;
@@ -53,6 +58,7 @@ async function main(): Promise<void> {
   console.warn(`worker consuming ${queue} as ${consumer.consumerTag}`);
 
   const shutdown = async () => {
+    releaseBroker();
     await consumer.stop();
     await channel.close();
     await connection.close();
@@ -65,6 +71,9 @@ async function main(): Promise<void> {
 if (process.argv[1]?.endsWith('index.js')) {
   main().catch((error: unknown) => {
     console.error(error);
-    process.exitCode = 1;
+    // Not exitCode: whatever started before the failure, a database pool or a
+    // timer, would keep a process alive that serves nothing, and a restart
+    // policy never sees it fail.
+    process.exit(1);
   });
 }

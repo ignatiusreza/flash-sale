@@ -7,7 +7,7 @@ import pg from 'pg';
  * database (docs/PLAN.md §9.1).
  */
 export function createPool(connectionString: string, max = 10): pg.Pool {
-  return new pg.Pool({
+  const pool = new pg.Pool({
     connectionString,
     max,
     options: '-c timezone=UTC',
@@ -16,6 +16,12 @@ export function createPool(connectionString: string, max = 10): pg.Pool {
     // cannot reach its database should say so immediately, not look wedged.
     connectionTimeoutMillis: 5_000,
   });
+  // An idle client losing its connection emits here, and unhandled it kills the
+  // process. The worker must outlive a database outage — that is what keeps
+  // its batch held rather than redelivered — so log it; the next query fails
+  // and is retried.
+  pool.on('error', (error) => console.error(`database: ${error.message}`));
+  return pool;
 }
 
 export type Queryable = Pick<pg.Pool, 'query'>;

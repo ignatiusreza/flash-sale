@@ -1,6 +1,7 @@
 import {
-  assertTopology,
   connectBroker,
+  declareTopology,
+  onBrokerLost,
   publishAttempt,
   publishPresence,
   subscribeToEvents,
@@ -24,15 +25,25 @@ async function main(): Promise<void> {
     options: '-c timezone=UTC',
     connectionTimeoutMillis: 5_000,
   });
+  // See createPool in apps/worker: an idle client's error is not fatal here
+  // either. The sale cache keeps its last snapshot and readiness reports it.
+  pool.on('error', (error) => console.error(`database: ${error.message}`));
 
   const saleCache = new SaleCache(pool, config.SALE_ID, config.SALE_REFRESH_MS);
   await saleCache.start();
 
   const connection = await connectBroker(config.RABBITMQ_URL);
-  const channel = await connection.createConfirmChannel();
-  const { queue, exchange } = await assertTopology(channel, {
+  const { queue, exchange } = await declareTopology(connection, {
     environment: config.APP_ENV,
     ...(config.QUEUE_MAX_LENGTH ? { maxLength: config.QUEUE_MAX_LENGTH } : {}),
+  });
+  const channel = await connection.createConfirmChannel();
+  // Without the broker the API can neither accept attempts nor deliver
+  // results, so it exits and is restarted; clients reconnect to another
+  // instance meanwhile and re-sync their orders.
+  const releaseBroker = onBrokerLost(connection, [channel], (reason) => {
+    console.error(`${reason}; exiting for a restart`);
+    process.exit(1);
   });
 
   const app = await buildServer({
@@ -76,6 +87,7 @@ async function main(): Promise<void> {
   app.log.info(`realtime gateway ready as ${gateway.instanceId}`);
 
   const shutdown = async () => {
+    releaseBroker();
     saleCache.stop();
     await subscription.stop();
     await gateway.close();
@@ -91,6 +103,9 @@ async function main(): Promise<void> {
 if (process.argv[1]?.endsWith('index.js')) {
   main().catch((error: unknown) => {
     console.error(error);
-    process.exitCode = 1;
+    // Not exitCode: whatever started before the failure, a database pool or a
+    // timer, would keep a process alive that serves nothing, and a restart
+    // policy never sees it fail.
+    process.exit(1);
   });
 }
