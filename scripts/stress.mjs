@@ -3,6 +3,7 @@
  * Runs a stress scenario against a stack of its own and checks the result:
  *
  *   pnpm stress sale       # oversubscribed sale: latency, throughput, invariants
+ *   pnpm stress load       # a buyer's wait while every attempt is a real claim
  *   pnpm stress shedding   # past the queue bound: clean 503s, nothing lost
  *   pnpm stress capacity   # exploratory: where the ceiling is
  *
@@ -40,10 +41,23 @@ const SCENARIOS = {
         STEADY_RATE: process.env.STRESS_STEADY_RATE,
         RUSH_RATE: String(this.rushRate),
         RUSH_HOLD_S: String(this.rushHoldS),
-        PROBE_RATE: process.env.STRESS_PROBE_RATE,
       };
     },
     check: checkSale,
+  },
+  load: {
+    stock: 10_000_000,
+    worker: 'from the start',
+    rate: Number(process.env.STRESS_RATE || 10_000),
+    holdS: Number(process.env.STRESS_HOLD_S || 20),
+    get vars() {
+      return {
+        RATE: String(this.rate),
+        HOLD_S: String(this.holdS),
+        PROBE_RATE: process.env.STRESS_PROBE_RATE,
+      };
+    },
+    check: checkLoad,
   },
   shedding: {
     stock: 1_000_000,
@@ -244,6 +258,39 @@ async function checkSale({ summary, results }) {
 }
 
 /**
+ * Every attempt a real claim: the rate held, each accepted attempt an order,
+ * and each answered exactly once — the wait is only worth reporting if the
+ * system was doing the work it stands for.
+ */
+async function checkLoad({ summary, results }) {
+  await untilQueueEmpty();
+  const accepted = count(summary, 'attempts_accepted');
+  await until(async () => results.length >= accepted, 10_000).catch(() => {});
+  const { orders } = await ledger();
+
+  const { rate, holdS } = scenario;
+  const planned = (5 * (1_000 + rate)) / 2 + rate * holdS;
+  const sent = count(summary, 'http_reqs{scenario:claims}');
+  const answered = new Set(results.map((result) => result.attemptId));
+  const confirmed = results.filter((result) => result.status === 'confirmed').length;
+
+  return [
+    {
+      name: `claims held ${rate}/s for ${holdS} s (${sent} of ${Math.round(planned)} sent)`,
+      pass: sent >= planned * 0.99,
+    },
+    {
+      name: `every accepted attempt claimed (${orders} orders for ${accepted} accepted)`,
+      pass: orders === accepted,
+    },
+    {
+      name: `every accepted attempt answered exactly once, and confirmed (${answered.size} answered, ${confirmed} confirmed)`,
+      pass: answered.size === accepted && results.length === accepted && confirmed === accepted,
+    },
+  ];
+}
+
+/**
  * Past the bound: the overflow is shed with 503, the API's memory does not
  * grow with it, and every attempt that was accepted is still there — the
  * stock is large, so each accepted attempt must become exactly one order.
@@ -360,7 +407,7 @@ function report(summary, verdicts) {
   // A quiet phase's p99 is not the rush's, so nothing is pooled across them.
   const latency = (metric) =>
     `p50 ${ms(metric, 'p(50)')} ms  p95 ${ms(metric, 'p(95)')} ms  p99 ${ms(metric, 'p(99)')} ms`;
-  for (const phase of ['steady', 'rush', 'probe']) {
+  for (const phase of ['steady', 'rush', 'claims', 'probe']) {
     const sent = n(`http_reqs{scenario:${phase}}`);
     if (sent === 0) continue;
     stress.say(`${phase.padEnd(7)}   ${sent} requests`);
@@ -368,7 +415,8 @@ function report(summary, verdicts) {
       stress.say(`  POST    ${latency(`http_req_duration{scenario:${phase}}`)}`);
     }
     if (m[`result_latency{scenario:${phase}}`]) {
-      stress.say(`  result  ${latency(`result_latency{scenario:${phase}}`)}`);
+      const samples = n(`results_timed{scenario:${phase}}`);
+      stress.say(`  result  ${latency(`result_latency{scenario:${phase}}`)}  (${samples} timed)`);
     }
   }
   stress.say('');
