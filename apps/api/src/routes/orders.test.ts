@@ -100,8 +100,20 @@ describe('POST /api/orders', () => {
     ['upcoming', 'not_started'],
     ['ended', 'ended'],
   ] as const)('rejects %s sales in-process with %s', async (status, reason) => {
+    // A window that agrees with the status: admission judges the edges by time.
+    const hour = 3_600_000;
+    const window =
+      status === 'upcoming'
+        ? {
+            startAt: new Date(Date.now() + hour).toISOString(),
+            endAt: new Date(Date.now() + 2 * hour).toISOString(),
+          }
+        : {
+            startAt: new Date(Date.now() - 2 * hour).toISOString(),
+            endAt: new Date(Date.now() - hour).toISOString(),
+          };
     const { app: server, published } = await createTestServer({
-      view: { ...activeView, status },
+      view: { ...activeView, status, ...window },
     });
     app = server;
 
