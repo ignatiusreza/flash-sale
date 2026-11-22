@@ -9,15 +9,23 @@
  * the API reads `sales`, and the compiled output must exist before `node
  * --watch` has anything to run. A generic runner does none of that ordering.
  *
- * Host ports are discovered from Compose rather than assumed, so this works
- * whatever POSTGRES_PORT / RABBITMQ_PORT happen to be.
+ * By default it uses the Postgres and RabbitMQ already running on this machine,
+ * with their stock credentials, so `pnpm dev` is the only command needed. Point
+ * it elsewhere with DATABASE_URL / RABBITMQ_URL, from the shell or `.env`.
  */
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** A local Postgres trusting its `postgres` user, and RabbitMQ's `guest`. */
+const DEFAULTS = {
+  DATABASE_URL: 'postgres://postgres@localhost:5432/flashsale_development',
+  RABBITMQ_URL: 'amqp://guest:guest@localhost:5672',
+};
 
 const COLORS = { types: 36, api: 32, worker: 35, web: 33, dev: 34 };
 const reset = '\u001B[0m';
@@ -37,22 +45,6 @@ function run(command, args, options = {}) {
   });
 }
 
-function capture(command, args) {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd: ROOT });
-    let out = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.on('error', () => resolve(''));
-    child.on('exit', () => resolve(out.trim()));
-  });
-}
-
-async function composePort(service, containerPort) {
-  const mapped = await capture('docker', ['compose', 'port', service, String(containerPort)]);
-  const port = mapped.split(':').pop();
-  return port && /^\d+$/.test(port) ? Number(port) : undefined;
-}
-
 function reachable(host, port, timeoutMs = 2000) {
   return new Promise((resolve) => {
     const socket = net.connect(port, host);
@@ -68,52 +60,35 @@ function reachable(host, port, timeoutMs = 2000) {
 }
 
 async function resolveServices() {
-  // Inside the devcontainer the services are already addressed by name and
-  // there is no docker CLI to ask, so an environment that says where they are
-  // wins over discovery. This is also the escape hatch for pointing the dev
-  // stack at something that is not Compose at all.
-  if (process.env.DATABASE_URL && process.env.RABBITMQ_URL) {
-    const pg = new URL(process.env.DATABASE_URL);
-    const mq = new URL(process.env.RABBITMQ_URL);
-    const [pgUp, mqUp] = await Promise.all([
-      reachable(pg.hostname, Number(pg.port || 5432)),
-      reachable(mq.hostname, Number(mq.port || 5672)),
-    ]);
-    if (!pgUp || !mqUp) {
-      say('dev', `cannot reach ${pg.hostname}:${pg.port} or ${mq.hostname}:${mq.port}`);
-      say('dev', 'DATABASE_URL and RABBITMQ_URL are set — are those services running?');
-      process.exit(1);
-    }
-    say('dev', `using DATABASE_URL (${pg.hostname}) and RABBITMQ_URL (${mq.hostname})`);
-    return { DATABASE_URL: process.env.DATABASE_URL, RABBITMQ_URL: process.env.RABBITMQ_URL };
-  }
+  // Values already in the environment win over `.env`, so a one-off override on
+  // the command line still works. The devcontainer sets both this way.
+  const envFile = path.join(ROOT, '.env');
+  if (existsSync(envFile)) process.loadEnvFile(envFile);
 
-  const [pgPort, mqPort] = await Promise.all([
-    composePort('postgres', 5432),
-    composePort('rabbitmq', 5672),
-  ]);
-
-  if (!pgPort || !mqPort) {
-    say('dev', 'Postgres and RabbitMQ are not running. Start them with:');
-    say('dev', '  docker compose up -d --wait');
-    process.exit(1);
-  }
-
-  const [pgUp, mqUp] = await Promise.all([
-    reachable('127.0.0.1', pgPort),
-    reachable('127.0.0.1', mqPort),
-  ]);
-  if (!pgUp || !mqUp) {
-    say('dev', `services mapped but not accepting connections (pg:${pgPort} mq:${mqPort})`);
-    say('dev', '  docker compose up -d --wait');
-    process.exit(1);
-  }
-
-  say('dev', `postgres on ${pgPort}, rabbitmq on ${mqPort}`);
-  return {
-    DATABASE_URL: `postgres://flashsale:flashsale@127.0.0.1:${pgPort}/flashsale`,
-    RABBITMQ_URL: `amqp://flashsale:flashsale@127.0.0.1:${mqPort}`,
+  const env = {
+    DATABASE_URL: process.env.DATABASE_URL || DEFAULTS.DATABASE_URL,
+    RABBITMQ_URL: process.env.RABBITMQ_URL || DEFAULTS.RABBITMQ_URL,
   };
+
+  const pg = new URL(env.DATABASE_URL);
+  const mq = new URL(env.RABBITMQ_URL);
+  const [pgUp, mqUp] = await Promise.all([
+    reachable(pg.hostname, Number(pg.port || 5432)),
+    reachable(mq.hostname, Number(mq.port || 5672)),
+  ]);
+
+  for (const [up, name, url, variable] of [
+    [pgUp, 'Postgres', pg, 'DATABASE_URL'],
+    [mqUp, 'RabbitMQ', mq, 'RABBITMQ_URL'],
+  ]) {
+    if (up) continue;
+    say('dev', `cannot reach ${name} at ${url.host}`);
+    say('dev', `  start it, or set ${variable} (in the shell or .env) to one that is running`);
+  }
+  if (!pgUp || !mqUp) process.exit(1);
+
+  say('dev', `postgres ${pg.host}${pg.pathname}, rabbitmq ${mq.host}`);
+  return env;
 }
 
 const children = [];
@@ -180,6 +155,11 @@ const env = await resolveServices();
 
 say('dev', 'building once so the watchers have something to run…');
 await run('pnpm', ['-s', 'build']);
+
+say('dev', 'creating the database if it is missing…');
+await run('pnpm', ['-s', '--filter', '@flash-sale/worker', 'create-database'], {
+  env: { ...process.env, ...env },
+});
 
 say('dev', 'applying migrations…');
 await run('pnpm', ['-s', '--filter', '@flash-sale/worker', 'migrate'], {

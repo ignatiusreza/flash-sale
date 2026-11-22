@@ -34,30 +34,51 @@ The first asserts on grants *returned to callers* as well as rows in the table. 
 
 - Node >= 24
 - pnpm (via `corepack enable`)
-- Docker, for Postgres and RabbitMQ
+- Postgres and RabbitMQ — already on your machine, or from Docker Compose
 
 ## Getting started
 
-To see the whole thing running:
+With a Postgres and RabbitMQ already running locally:
+
+```sh
+pnpm install
+pnpm dev        # http://localhost:5173
+```
+
+That is the whole setup. `pnpm dev` creates the `flashsale_development` database if it is missing, applies migrations, seeds a sale if none exists, builds once, then runs the TypeScript watcher, the API, the worker and the web dev server with labelled output. Ctrl-C stops all of them.
+
+It assumes each service's stock local credentials, and either can be overridden on its own — in the shell, or once in a `.env` file in the repo root (the shell wins):
+
+| Variable | Default |
+| --- | --- |
+| `DATABASE_URL` | `postgres://postgres@localhost:5432/flashsale_development` — the `postgres` superuser, no password |
+| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` — RabbitMQ's default user |
+
+If one is not reachable, `pnpm dev` says which and stops, rather than hanging.
+
+### Using the Compose services instead
+
+Without local services, Compose provides both — on non-default ports, so they never clash with ones you do have. Start them and point `pnpm dev` at them via `.env`:
+
+```sh
+docker compose up -d --wait
+cat >> .env <<'EOF'
+DATABASE_URL=postgres://flashsale:flashsale@localhost:15432/flashsale
+RABBITMQ_URL=amqp://flashsale:flashsale@localhost:15673
+EOF
+pnpm dev
+```
+
+To see the whole thing running, built and containerised, with nothing on the host but Docker:
 
 ```sh
 docker compose --profile app up -d --wait   # everything, built
 open http://localhost:8080
 ```
 
-To work on it, with watching and reload:
-
-```sh
-pnpm install
-docker compose up -d --wait   # Postgres + RabbitMQ only
-pnpm dev                      # API, worker and web dev server
-```
-
 The application services sit behind a Compose profile so they do not start by default — `pnpm dev` runs them on the host, and the two would otherwise fight over the same ports.
 
 There are only two application services, `api` and `worker`. The API serves the HTTP API, the WebSocket *and* the built frontend on one origin, so it is the only one publishing a port. Routing a browser between a SPA and an API is a deployment concern, left to whatever is already in front — an Ingress or HTTPRoute under Kubernetes, a CDN in production, the Vite proxy in development (docs/PLAN.md §12.1).
-
-`pnpm dev` is the whole stack: it discovers the service ports from Compose, builds once, applies migrations, seeds a sale if none exists, then runs the TypeScript watcher, the API, the worker and the web dev server with labelled output. Ctrl-C stops all of them.
 
 | Variable | Default | |
 | --- | --- | --- |
@@ -74,7 +95,7 @@ Seeding is idempotent, so restarting never resets stock out from under whatever 
 pnpm verify                   # format, lint, typecheck, test, licences, audit
 ```
 
-The services are published on **non-default host ports**, so they cannot clash with a Postgres or RabbitMQ already running on your machine:
+The Compose services are published on **non-default host ports**, so they cannot clash with a Postgres or RabbitMQ already running on your machine:
 
 | Service | Host | Override |
 | --- | --- | --- |
@@ -87,21 +108,19 @@ Compose reads a `.env` file in the repo root, so an override can be set once rat
 
 They are *published* rather than left ephemeral on purpose: Zed's dev-container support parses `docker compose config` with a deserializer that requires a `published` field on every port, and an unpublished port omits it — the container then fails to start with a YAML deserialization error.
 
-### Running it without Compose
+### Running the built app without Compose
 
-The app is two plain Node processes and needs nothing but a Postgres and a RabbitMQ it can reach, so pointing it at ones already running on your machine is just environment:
+`pnpm dev` is for working on the code. The built app is two plain Node processes needing nothing but a Postgres and a RabbitMQ they can reach, which is how a deployment runs it:
 
 ```sh
 pnpm build
-export DATABASE_URL=postgres://user:pass@localhost:5432/flashsale
-export RABBITMQ_URL=amqp://user:pass@localhost:5672
-pnpm migrate                                        # schema
+export DATABASE_URL=postgres://postgres@localhost:5432/flashsale
+export RABBITMQ_URL=amqp://guest:guest@localhost:5672
+pnpm migrate                                        # schema (the database must exist)
 pnpm seed                                           # a sale to buy from
 node apps/worker/dist/index.js &                    # the claim worker
 WEB_ROOT=apps/web/dist node apps/api/dist/index.js  # API + frontend on :3000
 ```
-
-`pnpm dev` does this for you against the Compose services, and honours `DATABASE_URL`/`RABBITMQ_URL` when they are already set, so the same command works inside a devcontainer.
 
 ### Deploying behind an ingress or gateway
 
