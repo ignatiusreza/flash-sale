@@ -1,7 +1,7 @@
 import type { Availability, SaleStatus } from '@flash-sale/core';
 import { useEffect, type Dispatch, type SetStateAction } from 'react';
 
-import { findOrder } from './api.js';
+import { lookupOrderUntilKnown } from './api.js';
 import { clearPending, loadPending, savePending } from './pending-attempt.js';
 import {
   idle,
@@ -64,18 +64,18 @@ export function usePendingAttempt(
   // missed, and the lookup says whether it won.
   useEffect(() => {
     if (!userId || !waitingId) return;
-    let cancelled = false;
+    const abort = new AbortController();
     const since = loadPending(userId)?.since ?? Date.now();
 
     const expiry = setTimeout(
       () => {
-        void findOrder(userId).then((orderId) => {
-          if (cancelled) return;
-          if (!orderId) clearPending(userId);
+        void lookupOrderUntilKnown(userId, abort.signal).then((lookup) => {
+          if (!lookup) return;
+          if (lookup.status === 'none') clearPending(userId);
           setPurchaseState((current) =>
             stillWaiting(current, waitingId)
-              ? orderId
-                ? { status: 'held', orderId }
+              ? lookup.status === 'held'
+                ? { status: 'held', orderId: lookup.orderId }
                 : idle
               : current,
           );
@@ -85,33 +85,34 @@ export function usePendingAttempt(
     );
 
     return () => {
-      cancelled = true;
+      abort.abort();
       clearTimeout(expiry);
     };
   }, [userId, waitingId, setPurchaseState]);
 
   // Once the sale has ended or sold out, a waiting attempt without an order
   // has failed, whether or not its result ever reached a page. Confirmed with
-  // a fresh lookup first: it may have won the last unit.
+  // a fresh lookup first, which must actually answer: it may have won the
+  // last unit, and a lookup that failed knows nothing either way.
   const outcome = outcomeFromSale(sale);
   const failedBecause = outcome?.status === 'rejected' ? outcome.reason : undefined;
   useEffect(() => {
     if (!userId || !waitingId || !failedBecause) return;
-    let cancelled = false;
+    const abort = new AbortController();
 
-    void findOrder(userId).then((orderId) => {
-      if (cancelled) return;
+    void lookupOrderUntilKnown(userId, abort.signal).then((lookup) => {
+      if (!lookup) return;
       setPurchaseState((current) =>
         stillWaiting(current, waitingId)
-          ? orderId
-            ? { status: 'held', orderId }
+          ? lookup.status === 'held'
+            ? { status: 'held', orderId: lookup.orderId }
             : { status: 'rejected', reason: failedBecause }
           : current,
       );
     });
 
     return () => {
-      cancelled = true;
+      abort.abort();
     };
   }, [userId, waitingId, failedBecause, setPurchaseState]);
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { Socket } from 'socket.io-client';
 
-import { findOrder } from './api.js';
+import { lookupOrderUntilKnown } from './api.js';
 
 /**
  * Asks whether this user holds an order and reports it, each time the socket
@@ -27,18 +27,19 @@ export function useOrderSync(
 
   useEffect(() => {
     if (!userId) return;
-    let cancelled = false;
+    const abort = new AbortController();
 
+    // Retried until it answers: a winner whose result was lost is found here.
     const sync = () => {
-      void findOrder(userId).then((orderId) => {
-        if (!cancelled && orderId) onOrderRef.current(orderId);
+      void lookupOrderUntilKnown(userId, abort.signal).then((lookup) => {
+        if (lookup?.status === 'held') onOrderRef.current(lookup.orderId);
       });
     };
     if (socket.connected) sync();
     socket.on('connect', sync);
 
     return () => {
-      cancelled = true;
+      abort.abort();
       socket.off('connect', sync);
     };
   }, [userId, socket]);
