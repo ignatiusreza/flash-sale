@@ -13,7 +13,7 @@ export function App() {
   const { socket, connected } = useSocket(userId || undefined);
   const { sale, offsetMs } = useSale(socket);
   const viewers = useViewers(socket);
-  const { purchaseState, purchase } = usePurchase(userId, socket);
+  const { purchaseState, purchase } = usePurchase(userId, socket, sale);
 
   return (
     <main>

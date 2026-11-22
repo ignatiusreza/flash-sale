@@ -188,6 +188,7 @@ Each spec seeds its own sale through `POST /api/test/sale`, which exists only wh
 | --- | --- |
 | `purchase` | click → 202 → a visible *queued* state → the result over the socket → held. The result is held back at the socket so the queued state can be observed; it normally lasts milliseconds. |
 | `reconnect` | a result lost with a dropped socket is recovered by re-syncing through `GET /api/orders?userId=` after reconnecting |
+| `refresh` | a refresh while a purchase waits in the queue keeps it — still *queued*, Buy disabled — and the outcome still lands: the order, or *sold out* once stock runs out; an attempt pending past two minutes is let go |
 | `concurrency` | five buyers race for two units: two hold, three see *sold out* |
 | `presence` | the viewer count converges as people arrive and leave |
 | `lifecycle` | *upcoming → active → ended*, live, with no reload |
