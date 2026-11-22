@@ -16,6 +16,11 @@ const schema = z.object({
    */
   WEB_ROOT: z.string().min(1).optional(),
   /**
+   * Registers `POST /api/test/sale`, which wipes and reseeds the sale. For the
+   * E2E suite only; never set in a deployed environment.
+   */
+  ENABLE_TEST_ENDPOINTS: z.stringbool().default(false),
+  /**
    * Which peers may be believed when they send `X-Forwarded-For`. This decides
    * what `request.ip` is, and `request.ip` is what the rate limiter keys on
    * (docs/PLAN.md §6), so it is a security setting rather than a formality.

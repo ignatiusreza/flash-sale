@@ -9,6 +9,7 @@ import { spa } from './http/spa.js';
 import { healthRoutes } from './routes/health.js';
 import { orderRoutes } from './routes/orders.js';
 import { saleRoutes } from './routes/sale.js';
+import { testRoutes } from './routes/testing.js';
 
 export type { ServerDeps } from './deps.js';
 
@@ -51,6 +52,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   await app.register(healthRoutes, deps);
   await app.register(saleRoutes, deps);
   await app.register(orderRoutes, deps);
+  if (deps.enableTestEndpoints) await app.register(testRoutes, deps);
 
   // Last: its not-found handler is the SPA fallback, so every real route must
   // already be registered for it to know what is genuinely missing.

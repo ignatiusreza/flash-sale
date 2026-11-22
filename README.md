@@ -4,7 +4,7 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 5 of 8.** The system works end to end — claim, queue, API, realtime and frontend. Remaining: E2E tests, stress tests and the write-up. See `docs/PLAN.md` §13.
+> **Status: phase 6 of 8.** The system works end to end — claim, queue, API, realtime and frontend — and a Playwright suite proves it from the browser. Remaining: stress tests and the write-up. See `docs/PLAN.md` §13.
 
 ## API
 
@@ -100,6 +100,7 @@ There are only two application services, `api` and `worker`. The API serves the 
 | `PORT` | `3000` | API port |
 | `WEB_ROOT` | — | directory of the built SPA; unset, the process is a pure API |
 | `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
+| `ENABLE_TEST_ENDPOINTS` | `false` | registers the E2E reset endpoint; never in a deployed environment |
 | `SEED_STOCK` | `100` | units in the seeded sale |
 | `SEED_DURATION_MINUTES` | `60` | how long it stays open |
 | `SEED_RESET` | — | `1` to recreate the sale and drop its orders |
@@ -154,6 +155,28 @@ Set **`TRUST_PROXY`** to the gateway's address or CIDR when you do. It decides w
 A hop count is **rejected at boot**: Fastify maps a numeric `trustProxy` to a function that trusts nothing, so accepting one would look configured while doing nothing.
 
 To serve the frontend from a CDN or bucket instead, leave `WEB_ROOT` unset and route `/` there. The image is the same.
+
+### End-to-end tests
+
+```sh
+pnpm exec playwright install chromium   # once
+pnpm test:e2e
+```
+
+Playwright starts its own stack and tears it down: it builds the app, then runs the API (serving the built SPA, as in production) on `:3100` and a worker, against the same local services as `pnpm dev` but a separate `flashsale_e2e` database. Stop `pnpm dev` first — its worker would consume the suite's purchase attempts, so the E2E server refuses to start while anything else is consuming them, and says so.
+
+Each spec seeds its own sale through `POST /api/test/sale`, which exists only when the API runs with `ENABLE_TEST_ENDPOINTS=true` — the E2E server sets it, no deployed environment ever should. Specs run one at a time, because there is one sale; there are no retries, because a flaky suite trains people to re-run red builds. When a spec fails, the Socket.IO frames it saw are attached to the report, which separates "the server never sent it" from "the page ignored it".
+
+| Spec | Proves |
+| --- | --- |
+| `purchase` | click → 202 → a visible *queued* state → the result over the socket → held. The result is held back at the socket so the queued state can be observed; it normally lasts milliseconds. |
+| `reconnect` | a result lost with a dropped socket is recovered by re-syncing through `GET /api/orders?userId=` after reconnecting |
+| `concurrency` | five buyers race for two units: two hold, three see *sold out* |
+| `presence` | the viewer count converges as people arrive and leave |
+| `lifecycle` | *upcoming → active → ended*, live, with no reload |
+| `time` | the same instant renders in each viewer's zone, labelled; a browser clock two hours fast leaves the countdown correct |
+| `rejection` | not yet open, ended, already held, `503` and `429` each end in a message — the last two substituted at the network, since producing a real `503` is the stress suite's job |
+| `double-click` | a double click sends exactly one attempt |
 
 ### Running the gates inside Docker
 
@@ -217,6 +240,7 @@ Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks
 | `pnpm build`                | `tsc -b` across the project graph, then the web bundle.     |
 | `pnpm typecheck`            | Build graph, test files, and the web app.                   |
 | `pnpm test`                 | Vitest, against local services by default (see above).      |
+| `pnpm test:e2e`             | Playwright against the built stack (see below).             |
 | `pnpm lint` / `pnpm format` | ESLint / Prettier.                                          |
 | `pnpm licenses:check`       | Fails on any dependency licence outside the allowlist.      |
 | `pnpm clean`                | Removes build output.                                       |

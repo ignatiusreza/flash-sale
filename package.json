@@ -19,6 +19,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "test:watch": "vitest",
     "audit": "pnpm audit --audit-level=high",
     "licenses:check": "node scripts/check-licenses.mjs",
@@ -26,6 +27,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.65.1",
     "@types/node": "^24.19.2",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^10.1.8",

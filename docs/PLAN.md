@@ -411,6 +411,18 @@ Three rules keep this layer from becoming a liability:
 
 Playwright can also observe the socket directly — `page.on('websocket', ws => ws.on('framereceived', …))` — which is worth wiring into the fixtures as a diagnostic. When a UI assertion fails it immediately separates "the server never sent it" from "the client ignored it", and those have very different fixes. Socket.IO frames carry Engine.IO encoding, so the UI state stays the primary assertion and frames are for triage.
 
+**As built (phase 6).** All eight specs exist and pass, 65 of 65 across five repetitions. Decisions taken while building them:
+
+- **One sale, reset per spec, run serially.** The API serves a single configured sale, so "each spec seeds its own sale" means each spec resets it through the test endpoint, and specs cannot run in parallel. The reset refreshes the API's sale cache before answering; otherwise a spec sees the previous sale for up to a second.
+- **The queued state is held, not raced.** In real timing the result follows the `202` by milliseconds, so `purchase` holds the result frame at the socket (`page.routeWebSocket`) until the queued state has been asserted, and `reconnect` drops it on the first connection.
+- **`503` and `429` are substituted at the network.** The spec tests the UI's handling; producing a real `503` means saturating the queue, which belongs to stress (phase 7).
+- **The E2E stack runs the built app**, not the Vite dev server: the API serves the SPA on one origin, as it ships.
+
+The layer earned its place on its first run, against code that had passed every unit test and a browser walkthrough:
+
+- **`reconnect` failed.** The page looked up the user's order on arrival but not on reconnect, so a result lost with the socket left it on *queued* for an order that existed. It now re-syncs after every automatic reconnect — making §5's "a dropped socket is cosmetic" true rather than asserted.
+- **Every upcoming sale crashed the page.** The local-time label combined `dateStyle` with `timeZoneName`, which the `Intl` constructor rejects, so rendering threw and the page went blank. Every earlier check had used an open sale.
+
 **Stress (k6).** Ramp to high concurrency over ~60 s with thresholds encoded as pass/fail, driving HTTP for attempts and holding WebSocket connections for results, so the measured latency is genuinely end-to-end rather than time-to-`202`. A teardown asserts the same invariants at realistic load. Results and their interpretation go into the README.
 
 **Load shedding is a test case, not an afterthought.** Drive past the queue bound and assert the API returns `503` cleanly, memory stays flat, and no attempt is silently dropped.

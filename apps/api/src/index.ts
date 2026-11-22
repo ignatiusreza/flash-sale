@@ -41,6 +41,7 @@ async function main(): Promise<void> {
     logger: true,
     ...(config.WEB_ROOT ? { webRoot: config.WEB_ROOT } : {}),
     trustProxy: config.TRUST_PROXY,
+    enableTestEndpoints: config.ENABLE_TEST_ENDPOINTS,
   });
 
   // Listen before attaching the gateway: Socket.IO needs the underlying server,
