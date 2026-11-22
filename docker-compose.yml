@@ -107,6 +107,26 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      # Without a sale the page has nothing to buy and the API is never ready.
+      seed:
+        condition: service_completed_successfully
+
+  # One-shot: the schema, then a sale to buy from. Idempotent — an existing
+  # sale is left as it is, so restarting the stack never resets stock.
+  seed:
+    profiles: ['app']
+    build:
+      context: .
+      target: worker
+    environment:
+      TZ: UTC
+      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432/flashsale
+      SEED_STOCK: '${SEED_STOCK:-100}'
+      SEED_DURATION_MINUTES: '${SEED_DURATION_MINUTES:-60}'
+    command: ['sh', '-c', 'node dist/cli/migrate.js && node dist/cli/seed.js']
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   worker:
     profiles: ['app']

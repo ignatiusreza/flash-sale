@@ -1,201 +1,195 @@
 # flash-sale
 
-A high-throughput flash sale backend: one product, limited stock, one item per user, under heavy concurrent load.
+A flash sale for one limited-stock product, one unit per buyer, built to stay correct and responsive under a stampede: purchases are queued and settled in batches by a single worker, and each buyer learns the outcome over a WebSocket.
 
-`docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
+On one laptop it holds **10 000 purchase attempts per second**, answers end to end in **34 ms at p99**, and sells **exactly** its stock — 20 000 units to 20 000 distinct buyers under 11.7× oversubscription, checked in the database afterwards.
 
-> **Status: phase 7 of 8.** The system works end to end — claim, queue, API, realtime and frontend — a Playwright suite proves it from the browser, and k6 proves it under load: 10 000 attempts/s held, the stock sold exactly. Remaining: the write-up. See `docs/PLAN.md` §13.
+`docs/REQUIREMENT.md` is the brief. `docs/PLAN.md` is the full design and its reasoning; this README is the summary a reviewer needs, and links into it.
 
-## API
+- [Running it](#running-it)
+- [System design](#system-design)
+- [Design choices and trade-offs](#design-choices-and-trade-offs)
+- [Robustness](#robustness)
+- [Scalability](#scalability)
+- [Testing](#testing) — including [stress results](#stress-tests)
+- [Reference](#reference) — API, realtime events, vocabulary
+- [Known limitations](#known-limitations)
+- [Repository](#repository)
 
-| Method | Path | Returns |
-| --- | --- | --- |
-| `GET` | `/api/sale` | status, coarse availability, window, `serverTime` — served from memory, no I/O |
-| `POST` | `/api/orders` | create — `202 queued` once the broker confirms, `Location` → the user's orders · `409` not started / ended / sold out · `429` · `503` busy |
-| `GET` | `/api/orders?userId=` | index, filtered by user — `[]` or the user's one order; `400` without the filter — the reconnect source of truth |
-| `GET` | `/healthz` `/readyz` | live as soon as the process is up; ready only once the sale is loaded |
+## Running it
 
-Interactive docs are served at **`/docs`**, with the OpenAPI document at `/docs/json`. The route schemas generate it, and Fastify compiles the same schemas for validation and response serialization — so documenting the API also makes it marginally faster.
+Needs Node ≥ 24, pnpm (`corepack enable`), and a Postgres and RabbitMQ — your own, or Docker's.
 
-Orders are a REST resource with two of the seven conventional actions, `index` and `create`. `new` and `edit` are server-rendered forms a single-page app has no use for, and an order cannot be changed or cancelled once claimed, so there is no `update` or `destroy`. A reconnecting client knows who it is but not its order id, so it lists its orders by user — a filtered `index` that returns zero or one entries. The filter is required: unfiltered, `index` would list every buyer to anyone while there is no authentication. Nothing needs `show` yet; it would be `GET /api/orders/:orderId`.
-
-`POST /api/orders` answers **202 Accepted, not 201 Created**: the order is accepted for creation, and the outcome arrives over the socket. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
-
-## Vocabulary
-
-Four words, kept distinct in code, the API and the messages:
-
-| Word | Means | In code |
-| --- | --- | --- |
-| **purchase** | the act — what a user does by pressing *Buy now*, which asks for an order to be created | `purchase()`, `canPurchase`, `purchaseState` (where this user's purchasing stands) |
-| **attempt** | one queued request that a purchase produces; it may or may not succeed | `PurchaseAttempt`, `attemptId`, queue `purchase.attempts` |
-| **result** | the worker's decision on an attempt | `PurchaseResult`, `purchase:result`; `confirmed`, `already_purchased`, `sold_out`, `not_started`, `ended` |
-| **order** | the row a successful attempt leaves behind — the only durable proof of a sale | `/api/orders`, `orders` table, `orderId`, `findOrder` |
-
-*Buy* is the button's wording, not a term in the code.
-
-## The claim
-
-`apps/worker/src/claim.ts` is the heart of the system: a single SQL statement that claims up to N units in arrival order, decrementing stock by the rows it *actually* inserted rather than by the batch size — which is what makes a redelivered batch a no-op instead of silently destroying stock.
-
-Two tests in `apps/worker/src/claim.test.ts` are the ones that matter, and both run in CI against a real Postgres:
-
-- **never oversells** — 20 000 attempts against stock of 1000 yields exactly 1000 grants, 1000 distinct users, and `remaining` at 0.
-- **never grants one user two units** — 500 concurrent attempts from a single user yield exactly one order.
-
-The first asserts on grants *returned to callers* as well as rows in the table. Both halves are needed: `docs/prototype/postgres-pool/` contains a claim that oversells 9.5× while leaving the table immaculate, so a row-count assertion alone would pass it.
-
-## Requirements
-
-- Node >= 24
-- pnpm (via `corepack enable`)
-- Postgres and RabbitMQ — already on your machine, or from Docker Compose
-
-## Getting started
-
-With a Postgres and RabbitMQ already running locally:
+**With Postgres and RabbitMQ already running locally**, using their stock credentials (passwordless `postgres`, RabbitMQ's `guest`):
 
 ```sh
 pnpm install
 pnpm dev        # http://localhost:5173
 ```
 
-That is the whole setup. `pnpm dev` creates the `flashsale_development` database if it is missing, applies migrations, seeds a sale if none exists, builds once, then runs the TypeScript watcher, the API, the worker and the web dev server with labelled output. Ctrl-C stops all of them.
+That is the whole setup: it creates the database, migrates, seeds a sale, builds, and runs the API, worker and web dev server with labelled output. Ctrl-C stops everything. Point it elsewhere with `DATABASE_URL` / `RABBITMQ_URL`, in the shell or a `.env`.
 
-It assumes each service's stock local credentials, and either can be overridden on its own — in the shell, or once in a `.env` file in the repo root (the shell wins):
-
-| Variable | Default |
-| --- | --- |
-| `DATABASE_URL` | `postgres://postgres@localhost:5432` — the `postgres` superuser, no password; with no database named, the environment picks it (`flashsale_development`) |
-| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` — RabbitMQ's default user |
-
-If one is not reachable, `pnpm dev` says which and stops, rather than hanging.
-
-### Environments
-
-`APP_ENV` says whose data a process works on, and each environment gets its own on every service — a database in Postgres, a queue and exchange in RabbitMQ — so they can share one Postgres and one broker without touching each other:
-
-| Run | `APP_ENV` | Database | Queue / exchange |
-| --- | --- | --- | --- |
-| `pnpm dev` | `development` | `flashsale_development` | `development.purchase.attempts` / `development.flash-sale.events` |
-| `pnpm test` | `test` | `flashsale_test` | a queue per test, deleted after it |
-| `pnpm test:e2e` | `e2e` | `flashsale_e2e` | `e2e.purchase.attempts` / `e2e.flash-sale.events` |
-| `pnpm stress` | `stress` | `flashsale_stress` | `stress.purchase.attempts` / `stress.flash-sale.events` |
-| deployed | `production` (default) | whatever `DATABASE_URL` names | `purchase.attempts` / `flash-sale.events` |
-
-For the database, `DATABASE_URL` says where Postgres is and who connects; the environment picks the database name unless the URL names one itself, in which case it is used as it is. The dev, test and E2E runs apply that rule; a deployed API and worker take `DATABASE_URL` exactly as given.
-
-It is not `NODE_ENV`, which says how code runs — build mode, React's dev checks. The two vary independently: E2E runs production code against test data. RabbitMQ virtual hosts would be the more literal split, but creating one needs broker admin rights, while queues and exchanges are declared on first use.
-
-### Using the Compose services instead
-
-Without local services, Compose provides both — on non-default ports, so they never clash with ones you do have. Start them and point `pnpm dev` at them via `.env`:
+**With nothing but Docker**, the built app, as it would ship:
 
 ```sh
-docker compose up -d --wait
-cat >> .env <<'EOF'
-DATABASE_URL=postgres://flashsale:flashsale@localhost:15432
-RABBITMQ_URL=amqp://flashsale:flashsale@localhost:15673
-EOF
-pnpm dev
-```
-
-Leave the database name off the URL: each environment then picks its own (`flashsale_development` for `pnpm dev`, `flashsale_test` for `pnpm test`), so they never share one. A URL that does name a database is used as it is.
-
-To see the whole thing running, built and containerised, with nothing on the host but Docker:
-
-```sh
-docker compose --profile app up -d --wait   # everything, built
+docker compose --profile app up -d --wait
 open http://localhost:8080
 ```
 
-The application services sit behind a Compose profile so they do not start by default — `pnpm dev` runs them on the host, and the two would otherwise fight over the same ports.
-
-There are only two application services, `api` and `worker`. The API serves the HTTP API, the WebSocket *and* the built frontend on one origin, so it is the only one publishing a port. Routing a browser between a SPA and an API is a deployment concern, left to whatever is already in front — an Ingress or HTTPRoute under Kubernetes, a CDN in production, the Vite proxy in development (docs/PLAN.md §12.1).
-
-| Variable | Default | |
-| --- | --- | --- |
-| `PORT` | `3000` | API port |
-| `WEB_ROOT` | — | directory of the built SPA; unset, the process is a pure API |
-| `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
-| `APP_ENV` | `production` | whose data: names the RabbitMQ queue and exchange — see [Environments](#environments) |
-| `SEED_STOCK` | `100` | units in the seeded sale |
-| `SEED_DURATION_MINUTES` | `60` | how long it stays open |
-| `SEED_RESET` | — | `1` to recreate the sale and drop its orders |
-
-Seeding is idempotent, so restarting never resets stock out from under whatever you were testing.
+**Tests:**
 
 ```sh
-pnpm verify                   # format, lint, typecheck, test, licences, audit
+pnpm verify                              # format, lint, typecheck, unit + integration, licences, audit
+pnpm exec playwright install chromium    # once
+pnpm test:e2e                            # Playwright, against a stack it starts itself
+pnpm stress sale                         # k6, against a stack it starts itself — see Stress tests
 ```
 
-`pnpm test` uses the same local defaults and `.env` as `pnpm dev`, against a separate `flashsale_test` database (created if missing) so a test run never writes into the data you are clicking through. If no URL is set and nothing is listening on the default port, the suites that need that service skip with a warning, so a checkout with no services still runs the unit tests. A URL you set explicitly has to be reachable, or those suites fail.
+Each of these runs in its own environment — its own database and queues — so they run side by side with `pnpm dev` on one Postgres and one broker. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) covers the environments, using the Compose services, running the built app by hand, deploying behind a gateway, and the devcontainer.
 
-The Compose services are published on **non-default host ports**, so they cannot clash with a Postgres or RabbitMQ already running on your machine:
+## System design
 
-| Service | Host | Override |
-| --- | --- | --- |
-| Postgres | `15432` | `POSTGRES_PORT` |
-| RabbitMQ | `15673` | `RABBITMQ_PORT` |
-| RabbitMQ management UI | `15674` | `RABBITMQ_UI_PORT` |
-| Application (`--profile app`) | `8080` | `APP_PORT` |
+```mermaid
+flowchart TB
+    B["Browser — React"]
 
-Compose reads a `.env` file in the repo root, so an override can be set once rather than on every command.
+    subgraph API["API tier, scaled out"]
+        A1["API instance<br/>Fastify + Socket.IO<br/>in-memory sale cache"]
+        A2["API instance"]
+    end
 
-They are *published* rather than left ephemeral on purpose: Zed's dev-container support parses `docker compose config` with a deserializer that requires a `published` field on every port, and an unpublished port omits it — the container then fails to start with a YAML deserialization error.
+    Q[["Attempts queue — RabbitMQ<br/>quorum · single active consumer · bounded"]]
+    W["Worker<br/>batched claim"]
+    P[("Postgres<br/>sales · orders")]
+    F[["Events fanout — RabbitMQ"]]
 
-### Running the built app without Compose
-
-`pnpm dev` is for working on the code. The built app is two plain Node processes needing nothing but a Postgres and a RabbitMQ they can reach, which is how a deployment runs it:
-
-```sh
-pnpm build
-export DATABASE_URL=postgres://postgres@localhost:5432/flashsale
-export RABBITMQ_URL=amqp://guest:guest@localhost:5672
-pnpm migrate                                        # schema (the database must exist)
-pnpm seed                                           # a sale to buy from
-node apps/worker/dist/index.js &                    # the claim worker
-WEB_ROOT=apps/web/dist node apps/api/dist/index.js  # API + frontend on :3000
+    B -- "POST /api/orders → 202<br/>WebSocket: result, status, viewers" --> API
+    API -- "publish attempt, wait for confirm" --> Q
+    Q -- "batches of up to 500" --> W
+    W -- "one statement per batch" --> P
+    W -- "results, only after commit" --> F
+    F -- "to every instance" --> API
+    P -. "sale re-read every second" .-> API
 ```
 
-### Deploying behind an ingress or gateway
+- **API** (Fastify + Socket.IO). Turns away what it can from memory — outside the sale window, sold out, over the rate limit — publishes the rest to RabbitMQ and waits for the broker's confirm, then answers `202`. Holds each buyer's WebSocket. Stateless apart from its sockets, so it scales out; it also serves the built frontend on the same origin.
+- **RabbitMQ.** Carries purchase *attempts* — requests, not decisions — on a durable, length-bounded quorum queue with a single active consumer, and carries results and presence back on a fanout exchange to every API instance.
+- **Worker.** The only writer. Takes attempts in batches and settles each batch in one SQL statement, then publishes the results — after the commit, never before.
+- **Postgres.** The system of record, and the last line of defence: its constraints make an oversell or a double grant impossible to store, even if the code were wrong.
 
-Nothing here assumes Compose. Two images (`api`, `worker`), a Service for the API, and an HTTPRoute or Ingress sending `/` to it is the whole topology — the API already serves the API, the socket and the SPA on one origin, so there is no reverse proxy to template and no second Deployment to run.
+### A purchase, step by step
 
-Set **`TRUST_PROXY`** to the gateway's address or CIDR when you do. It decides whether `request.ip` comes from the socket or from `X-Forwarded-For`, and `request.ip` is what the per-IP rate limiter keys on, so it is a security setting:
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant A as API instance
+    participant Q as Attempts queue
+    participant W as Worker
+    participant P as Postgres
+    participant F as Events fanout
 
-| `TRUST_PROXY` | `request.ip` | |
+    B->>A: WebSocket connect (userId)
+    B->>A: POST /api/orders {userId}
+    A->>A: rate limit, then window and stock from the cache
+    alt doomed: not open, ended or sold out
+        A-->>B: 409 — no queue, no database
+    else admitted
+        A->>Q: publish attempt
+        Q-->>A: confirm — persisted
+        A-->>B: 202 {attemptId}
+        Q->>W: deliver, batched
+        W->>P: claim the whole batch in one statement
+        P-->>W: who was granted, stock left
+        W->>F: results — only after the commit
+        W->>Q: ack the batch
+        F->>A: results, to every instance
+        A-->>B: purchase:result, to that user's sockets
+    end
+```
+
+The `202` means *accepted*, not *bought*: the answer comes over the socket, typically within tens of milliseconds. If the socket drops or the page is refreshed in between, the page recovers the outcome from `GET /api/orders?userId=` and its own record of the attempt it is waiting on (see [Robustness](#robustness)).
+
+### Where each rule is enforced
+
+| Rule | Enforced by | Backstop if the code were wrong |
 | --- | --- | --- |
-| unset / `false` | the socket peer | right when clients connect directly |
-| `10.0.0.0/8`, `loopback`, … | the client, as reported by a proxy you named | the safe setting behind a gateway |
-| `true` | whatever the client sent | the client picks its own rate-limit bucket; only safe if nothing but the gateway can reach the process |
+| **Limited stock** | The claim locks the sale row and decrements by the number of orders it actually inserted, in one statement ([`claim.ts`](apps/worker/src/claim/claim.ts)) | `CHECK (remaining >= 0)` |
+| **One unit per buyer** | `INSERT … ON CONFLICT (sale_id, user_id) DO NOTHING` in the same statement | `UNIQUE (sale_id, user_id)` |
+| **The sale window** | The claim checks the window under the same lock; the API also turns early and late attempts away from its cache | — |
+| **Never a false "yes"** | Results are published only after the transaction commits; the batch is acked only after that | A redelivered batch is a no-op: everyone in it already holds their order, so nothing is inserted and nothing decremented |
 
-A hop count is **rejected at boot**: Fastify maps a numeric `trustProxy` to a function that trusts nothing, so accepting one would look configured while doing nothing.
+## Design choices and trade-offs
 
-To serve the frontend from a CDN or bucket instead, leave `WEB_ROOT` unset and route `/` there. The image is the same.
+Each is argued at length, with measurements, in `docs/PLAN.md`.
+
+1. **Asynchronous purchase: `202`, then the answer over a WebSocket** (PLAN §3). A synchronous claim per request means every request holds a database lock — measured as a lock convoy at 899 claims/s with 55 ms mean latency. Queueing turns the stampede into an orderly line. *The cost:* the client must handle an answer that arrives separately — reconnects, refreshes and several tabs all have to be designed for, and are tested.
+
+2. **One worker, settling claims in batches** (§4). A single active consumer means there is no race to arbitrate: correctness comes from the topology, not from locking. Batching is what makes one worker fast enough — 835 claims/s one at a time, ~37 000–41 500/s at 100 per single-statement transaction, because the fsync per commit is amortised. Batches go up to 500 (`CLAIM_BATCH_MAX`): under light load the 5 ms timer flushes first, so large batches only form in a rush, when throughput is what counts. *The cost:* that one consumer is the throughput ceiling (see [Scalability](#scalability)).
+
+3. **A stock counter row, not a pool of unit rows** (§16 q5). Both were measured. The counter is simpler and batches better; a pool gives each unit a lifecycle, which only matters once there is a payment step with reservations (§15.2). Decided counter, with the switch point written down.
+
+4. **The queue and Postgres decide; no cache decides** (§3). A Redis script granting stock is faster, but then a grant exists before it is durable, and a crash in that window tells a buyer "yes" while they hold nothing. Here a result is only ever published after the commit. *The cost:* RabbitMQ is a hard dependency — mitigated by a quorum queue on a three-node cluster in production (§5.1).
+
+5. **Postgres over MongoDB** (§3), on measurement: 3–7× faster at equal fairness, and MongoDB has no `FOR UPDATE SKIP LOCKED` equivalent.
+
+6. **Turn away doomed traffic at the API, from memory** (§6). Each API instance re-reads the sale every second and refuses attempts outside the window or after sellout without touching the queue or the database. In the stress run, 208 000 of 233 000 attempts were answered this way. *The cost:* for up to a second after sellout, attempts are still queued — and then rejected by the worker. The cache can only be wrong in that harmless direction.
+
+7. **Results reach the right socket by fanout, not by a shared registry** (§8). Every API instance receives every result and delivers to the sockets it holds. No Socket.IO adapter, no user-to-instance map; the extra fan-out is bounded by the request rate.
+
+8. **The API serves the frontend** (§12.1). One origin, one image for the API. Routing between SPA and API is left to whatever is in front — a gateway, a CDN, the Vite proxy in development — rather than baked into an nginx image.
+
+9. **The pending attempt lives in the browser** (`usePendingAttempt`). Only the browser that sent an attempt needs to know it is pending, and recording it server-side would put a write on the one request path kept free of them. *The cost:* "pending" does not follow a buyer to another device — harmless, since the server allows one order per buyer regardless.
+
+10. **An environment per run** (`APP_ENV`). Development, test, E2E and stress each get their own database and queue names on shared services, so none can consume another's purchases.
+
+## Robustness
+
+| Failure | What happens |
+| --- | --- |
+| Worker dies mid-batch | The transaction rolls back; the messages were never acked, so they are redelivered to the next consumer. |
+| Worker dies after commit, before ack | The batch is redelivered; the claim inserts nothing for buyers who already hold an order, so it is a no-op. |
+| API instance dies | Its sockets drop; clients reconnect to another instance and re-sync their order from `GET /api/orders`. Queued attempts are unaffected. |
+| A result is lost — socket down, or page refreshed mid-purchase | The page re-syncs after every reconnect; on a refresh it restores the attempt it was waiting on and still recognises the outcome. A result missed while no page was open is settled from the order lookup and the sale's state. |
+| Postgres down | The worker stops acking; the queue fills to its bound, then the API sheds with `503`. No wrong answers. |
+| Traffic beyond capacity | The queue is bounded; past it the API answers `503` immediately instead of queueing without limit. Measured: every accepted attempt still became an order. |
+| A broker node dies | (Production topology.) The quorum queue elects a new leader within seconds; a confirm means a majority already held the message. |
+
+The property under all of it: **nobody is told "confirmed" unless the order is committed.** An outage is honest; a false confirmation is not, and the design trades availability for that (PLAN §5).
+
+## Scalability
+
+- **The API scales out** freely — it holds nothing but its sockets — and absorbs the bulk of a rush on its own, from memory.
+- **The worker is deliberately singular**, and is the ceiling: ~44 000 claims/s for the worker path in isolation at batches of 500, and ~18 000 attempts/s on the queue path in the shared-laptop stress run when every attempt is a winner — where k6, not the worker, ran out first. Beyond it the system sheds rather than slows.
+- **The next 10×** (PLAN §15.1): shard the stock into K rows with one consumer each, routed by buyer; or put a fast admission filter ahead of the queue that lets only potential winners through. Neither requires changing the claim.
+
+## Testing
+
+| Layer | What | Run |
+| --- | --- | --- |
+| Unit + integration | 165 tests: the claim against a real Postgres, including the two that matter — **never oversells** (20 000 attempts against 1 000 units yields exactly 1 000 orders to 1 000 buyers) and **never grants one buyer two units** (500 concurrent attempts by one buyer yield one order); queue wiring and redelivery against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
+| End to end | 16 Playwright specs against the built app | `pnpm test:e2e` |
+| Stress | k6 scenarios, then the invariants checked in Postgres | `pnpm stress <scenario>` |
+
+CI runs the first two on every pull request — the unit suite twice, once in a non-UTC timezone, since a suite that only passes in UTC cannot catch code that depends on the local zone.
+
+The oversell test asserts on grants *returned to callers*, not only on rows: `docs/prototype/postgres-pool/` holds a claim that oversells 9.5× while leaving the table looking perfect.
 
 ### End-to-end tests
 
-```sh
-pnpm exec playwright install chromium   # once
-pnpm test:e2e
-```
-
-Playwright starts its own stack and tears it down: it builds the app, then runs the API (serving the built SPA, as in production) on `:3100` and a worker, as `APP_ENV=e2e` — the same local services as `pnpm dev`, but its own database and queues (see [Environments](#environments)), so it runs happily beside a `pnpm dev`. It takes service locations from the shell only, never from `.env`: a `DATABASE_URL` there names your development database, and the suite's reset endpoint would wipe its orders.
-
-Each spec seeds its own sale through `POST /api/test/sale`, which exists only when the API runs as `APP_ENV=e2e` — not in development, whose data is your work, and never in production. Specs run one at a time, because there is one sale; there are no retries, because a flaky suite trains people to re-run red builds. When a spec fails, the Socket.IO frames it saw are attached to the report, which separates "the server never sent it" from "the page ignored it".
+Playwright drives real browsers against a stack it starts itself (the API serving the built frontend, plus a worker). Each spec reseeds the sale through a reset endpoint that exists only in the E2E environment. No retries: a flaky suite trains people to re-run red builds.
 
 | Spec | Proves |
 | --- | --- |
-| `purchase` | click → 202 → a visible *queued* state → the result over the socket → held. The result is held back at the socket so the queued state can be observed; it normally lasts milliseconds. |
-| `reconnect` | a result lost with a dropped socket is recovered by re-syncing through `GET /api/orders?userId=` after reconnecting |
-| `refresh` | a refresh while a purchase waits in the queue keeps it — still *queued*, Buy disabled — and the outcome still lands: the order, or *sold out* once stock runs out; an attempt pending past two minutes is let go |
+| `purchase` | click → `202` → a visible *queued* state → the result over the socket → held |
+| `reconnect` | a result lost with a dropped socket is recovered after reconnecting |
+| `refresh` | a refresh mid-purchase keeps it, and the outcome still lands — the order, or *sold out* |
 | `concurrency` | five buyers race for two units: two hold, three see *sold out* |
-| `presence` | the viewer count converges as people arrive and leave |
+| `presence` | the viewer count follows people arriving and leaving |
 | `lifecycle` | *upcoming → active → ended*, live, with no reload |
-| `time` | the same instant renders in each viewer's zone, labelled; a browser clock two hours fast leaves the countdown correct |
-| `rejection` | not yet open, ended, already held, `503` and `429` each end in a message — the last two substituted at the network, since producing a real `503` is the stress suite's job |
-| `double-click` | a double click sends exactly one attempt |
+| `time` | one instant shown in Tokyo and St John's, each labelled; a browser clock two hours fast leaves the countdown right |
+| `rejection` | not yet open, ended, already held, `503`, `429` — each ends in a message |
+| `double-click` | exactly one attempt sent |
 
 ### Stress tests
 
@@ -205,125 +199,91 @@ pnpm stress shedding    # past the queue bound: clean 503s, nothing accepted los
 pnpm stress capacity    # exploratory: the ceiling with every attempt queued
 ```
 
-Each run builds the app and starts its own stack as `APP_ENV=stress` — so it runs beside `pnpm dev` and the E2E suite — with **two API instances**: a buyer's socket goes to one and their `POST` to the other, so every result crosses instances through the fanout. [k6](https://k6.io) drives the load from Docker (`grafana/k6:2.3.0`), standing in for many clients, each with its own address so the per-IP rate limit sees them as distinct. Afterwards the run checks the invariants **in Postgres**, because a load test that only reports throughput proves nothing. Stress is not in CI — it needs sustained load a shared runner cannot give reliably (`docs/PLAN.md` §16, question 3).
+Each run builds the app and starts its own stack with **two API instances** — a buyer's socket on one, their `POST` on the other, so every result crosses instances. [k6](https://k6.io) drives the load from Docker, standing in for many clients, each with its own address so the rate limiter sees them as distinct. Afterwards the run checks the invariants **in Postgres** and prints `PASS`/`FAIL` for each, because a load test that only reports throughput proves nothing. Stress is not in CI: sustained load on a shared runner is noise.
 
-k6 is AGPL-3.0. It runs as a separate program driving the API over HTTP and WebSockets, never linked into, bundled with or shipped alongside this code — the same position as Postgres and RabbitMQ under the licence rule in `CLAUDE.md`.
+**Expected outcome** — every line `PASS`. Measured on one laptop (Ryzen 5 7640U, 12 threads, 30 GB) running k6, both APIs, the worker, Postgres and RabbitMQ together:
 
-**Results** — on one laptop (AMD Ryzen 5 7640U, 6 cores / 12 threads, 30 GB) running k6, both API instances, the worker, Postgres and RabbitMQ at once:
-
-| Scenario | Target (`docs/PLAN.md` §2.3) | Measured |
+| Scenario | Target (PLAN §2.3) | Measured |
 | --- | --- | --- |
-| `sale` steady: buyers connected over the socket, timed from `POST` to result | p99 < 100 ms | p50 9 ms, p95 24 ms, **p99 34 ms** |
-| `sale` rush: opening-second stampede, HTTP | ≥ 10 000 attempts/s sustained | **10 000/s held for 20 s** — 227 318 of 227 500 planned sent, 0 failed; `POST` p99 21 ms |
-| `sale` invariants, 20 000 units, 11.7× oversubscribed | zero oversell, zero double grant | **20 000 orders to 20 000 distinct buyers, stock 0** — every confirmed result a committed order |
-| `shedding`: worker stopped, 5 000/s at a 2 000 bound | clean rejection, nothing unbounded | 47 918 shed with `503`, 0 failed; **all 2 005 accepted became orders**; API memory +41 MB |
-| `capacity`: 10 000/s held, stock that never sells out | — | ~8 600/s sustained through the queue; past that the queue reaches its bound and sheds cleanly |
+| `sale` — buyers connected over the socket, timed from `POST` to result | p99 < 100 ms | p50 9 ms, p95 25 ms, **p99 35 ms** |
+| `sale` — the rush, ramped to and held at the target rate | ≥ 10 000 attempts/s sustained | **10 000/s held for 20 s**, 0 failed, `POST` p99 22 ms |
+| `sale` — correctness: 20 000 units, 11.7× oversubscribed | no oversell, no double grant | **20 000 orders to 20 000 distinct buyers, stock 0** |
+| `shedding` — worker stopped, 5 000/s against a bound of 2 000 | clean rejection, nothing lost | 47 918 shed with `503`; **all 2 005 accepted became orders**; API memory +41 MB |
+| `capacity` — ramped to 20 000/s offered, stock that never sells out | — | **~18 000/s sustained through the queue**, nothing shed; k6 could not offer more |
 
-What the numbers mean:
+**Reading the results:**
 
-- **The rush is held at the API, not the queue.** Of 233 000 attempts, 208 000 were refused with `409` from the in-memory sale cache once stock was gone (`docs/PLAN.md` §6); only 25 000 — the 20 000 winners and those arriving within the cache's one-second refresh — ever reached the queue. That is the design working: doomed traffic is the cheapest to answer.
-- **The queue path's own ceiling is lower,** about 8 600 attempts/s when every attempt is a winner, on hardware shared with everything else. Past it the system degrades the way it should: the queue fills to its bound and the overflow gets a clean `503`, as `shedding` shows, rather than unbounded latency or lost purchases.
-- **The bound is not exact.** With two instances publishing at once, 2 005 attempts were accepted for a bound of 2 000 (50 over at 50 000). What matters — that the queue stops growing and every accepted attempt survives — holds.
+- **The rush is held at the API.** Of 233 000 attempts, 208 000 were refused from the in-memory cache once stock was gone; only ~25 000 — the winners, plus those arriving within the cache's one-second refresh — ever reached the queue. Doomed traffic is the cheapest to answer, by design.
+- **The queue path's own ceiling is lower,** but above what this laptop can offer: ~18 000 attempts/s when every attempt wins, on hardware shared with everything else. At batches of 100 the same run topped out at ~8 000/s and shed 241 000 attempts; at 500 it shed none. Past its ceiling the system degrades by shedding with `503`, not by growing latency or losing purchases — `shedding` proves both halves.
+- **Batch size does not cost latency.** Alternating runs at 100 and 500 gave the same result p99 (32–40 ms and 35–42 ms): only ~25 000 attempts reach the queue over the whole run, a few per 5 ms flush, so neither size is ever reached.
+- **The queue's bound is approximate** with two instances publishing at once (2 005 accepted for 2 000). What matters holds: it stops growing, and nothing accepted is lost.
+- **The first run found a real bug.** The worker drained at ~4 000 claims/s against ~35 000 for the claim alone: Nagle's algorithm held each batch's ack ~20 ms behind its result publish. With it off (`connectBroker`), the same drain runs at ~33 000/s.
 
-**What the first run found.** The worker drained at ~4 000 claims/s, against ~35 000/s for the claim alone. The time went to Nagle's algorithm: the worker writes a batch's results and then its ack in two small pieces, and with Nagle on (amqplib's default) the second waited ~20 ms on the broker's delayed acknowledgement of the first — every batch. Connecting with `noDelay` (`connectBroker` in `@flash-sale/messaging`) took the same drain to ~33 000 claims/s in isolation and ~18 000/s in the shared stack, and halved the API's `POST` latency, which waits on a broker confirm every time.
+k6 is AGPL-3.0. It runs as a separate program driving the API over the wire, never linked into or shipped with this code — the same position as Postgres and RabbitMQ under the licence rule in `CLAUDE.md`.
 
-### Running the gates inside Docker
+## Reference
 
-The `runner` service builds the `test` stage of the `Dockerfile` and reaches the services **by name** over the compose network, so no host port is involved at all:
+### API
 
-```sh
-docker compose run --build --rm runner              # the whole verify gate
-docker compose run --build --rm runner pnpm test    # or any other script
-```
+Interactive docs at **`/docs`** (OpenAPI at `/docs/json`), generated from the same route schemas Fastify validates with.
 
-**`--build` is not optional.** The image bakes the source at build time, so without it `run` silently reuses the last image and tests your previous edit — which looks exactly like a change that did not work.
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/sale` | status, coarse availability, window, `serverTime` — served from memory |
+| `POST` | `/api/orders` | create: `202` with `attemptId` once the broker confirms, `Location` → the buyer's orders · `409` not open / ended / sold out · `429` · `503` |
+| `GET` | `/api/orders?userId=` | index, filtered by buyer: `[]` or their one order · `400` without the filter |
+| `GET` | `/healthz` `/readyz` | live once up; ready once the sale is loaded |
 
-`tests/integration/services.test.ts` asserts the services are reachable wherever the suite was pointed. The `Dockerfile` also has `api` and `worker` targets that ship production dependencies only; neither has a server to run until phases 2–4.
+Orders are a REST resource with `create` and a filtered `index`. `create` answers `202 Accepted`, not `201 Created`, because the order is decided asynchronously. The lookup is a filtered `index` rather than a `show`, because a reconnecting client knows the buyer, not the order id; the filter is required, since unfiltered it would list every buyer to anyone.
 
-### Or use the devcontainer
+### Realtime
 
-Both editors read the same `.devcontainer/devcontainer.json`, which builds on the repo's own `docker-compose.yml` — so the development services are not a second copy that can drift from it. Node and pnpm match the versions CI uses, and `pnpm install` runs on create.
-
-- **VS Code** — "Reopen in Container".
-- **Zed** — it prompts on opening the project, or run `Project: Open Remote` and choose the dev container. Zed needs Docker or Podman on `PATH`, and does not rebuild automatically after you edit `devcontainer.json`, so stop the container first.
-
-Inside the container the services are reachable by name — `postgres:5432`, `rabbitmq:5672` — already wired up as `DATABASE_URL` and `RABBITMQ_URL`. Host port clashes cannot affect that, because nothing inside goes through the host mapping. The API and web ports are published by Compose rather than left to editor-specific forwarding, so they behave the same in either editor and with no editor at all.
-
-#### If the container will not start
-
-`Bind for 0.0.0.0:3000 failed: port is already allocated` almost always means another copy of this project still has a container running — editors leave the Compose stack up when the window closes, so a session you finished hours ago can still hold the port. Find it and stop it:
-
-```sh
-docker ps --format '{{.Names}}\t{{.Ports}}' | grep 3000
-docker stop <name>                      # reversible; volumes are untouched
-```
-
-Only one checkout can hold 3000 and 5173 at a time. To run two side by side — a worktree alongside the main checkout — give one of them its own ports in a `.env`:
-
-```sh
-API_PORT=3100
-WEB_PORT=5174
-POSTGRES_PORT=15442
-RABBITMQ_PORT=15683
-RABBITMQ_UI_PORT=15684
-```
-
-Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks.json` for Zed, `customizations.vscode` inside `devcontainer.json` for VS Code. Both set the same thing — Prettier owns formatting, ESLint fixes on save — so the gates behave identically whichever you use.
-
-## Layout
-
-| Path            | What it is                                                                               |
-| --------------- | ---------------------------------------------------------------------------------------- |
-| `packages/core` | Shared contracts and domain logic. No Node globals — it is bundled into the browser too. |
-| `apps/api`      | Fastify server and Socket.IO. Phases 3–4.                                                |
-| `apps/worker`   | Queue consumer and the transactional claim. Phases 1–2.                                  |
-| `apps/web`      | Vite + React client. Phase 5.                                                            |
-| `tests/`        | `integration/` (Vitest), `e2e/` (Playwright), `stress/` (k6).                            |
-| `scripts/`      | Repo tooling, including the licence gate.                                                |
-
-## Scripts
-
-| Command                     | Does                                                        |
-| --------------------------- | ----------------------------------------------------------- |
-| `pnpm verify`               | Everything CI runs, in CI's order. Run this before pushing. |
-| `pnpm build`                | `tsc -b` across the project graph, then the web bundle.     |
-| `pnpm typecheck`            | Build graph, test files, and the web app.                   |
-| `pnpm test`                 | Vitest, against local services by default (see above).      |
-| `pnpm test:e2e`             | Playwright against the built stack (see below).             |
-| `pnpm stress <scenario>`    | k6 load against a stack of its own, then the invariants (see below). |
-| `pnpm lint` / `pnpm format` | ESLint / Prettier.                                          |
-| `pnpm licenses:check`       | Fails on any dependency licence outside the allowlist.      |
-| `pnpm clean`                | Removes build output.                                       |
-
-## Realtime
-
-Clients connect a Socket.IO socket identifying themselves with a `userId`, and receive:
+Clients connect a Socket.IO socket identifying the buyer, and receive:
 
 | Event | When |
 | --- | --- |
-| `purchase:result` | their attempt is settled — `confirmed`, `already_purchased`, `sold_out`, `not_started` or `ended` |
+| `purchase:result` | an attempt is settled: `confirmed`, `already_purchased`, `sold_out`, `not_started` or `ended` |
 | `sale:status` | on connect, and whenever status or availability changes |
-| `sale:viewers` | periodically, with the aggregated viewer count |
+| `sale:viewers` | on connect and every few seconds: how many people are looking |
 
-**Every API instance receives every result** from the RabbitMQ fanout and delivers only to the sockets it holds. That is deliberate: a result targets exactly one user, so no shared adapter and no user-to-instance registry is needed — the cost of the extra fan-out is bounded by the request rate (`docs/PLAN.md` §8).
+Results go to **every** socket of the buyer, on every instance — so a buyer's other tabs learn of the order too. Two tabs attempting at once see `confirmed` and `already_purchased`, both carrying the same `orderId`; the page keys on that.
 
-**The viewer count is aggregated, not exact.** Each instance announces its own socket count on a timer and every instance sums what it has heard, expiring instances that go quiet. It converges within an announcement interval rather than being instantaneous, which is the right trade for a decorative number — exact accounting broadcast to everyone would be O(N²).
+### Vocabulary
 
-A socket that does not identify itself is refused during the handshake: nothing could ever be routed to it.
+| Word | Means |
+| --- | --- |
+| **purchase** | the act: what *Buy now* does, asking for an order |
+| **attempt** | one queued request a purchase produces; it may or may not succeed |
+| **result** | the worker's decision on an attempt |
+| **order** | the row a successful attempt leaves — the only durable proof of a sale |
 
-### The same user in several tabs
+## Known limitations
 
-Results are delivered **per user, not per attempt**, so every tab a user has open — on any instance — receives every result for that user, including attempts it did not make itself. That is deliberate: a tab that never clicked Buy still learns its user now holds an order, instead of showing a stale "not purchased".
+- **No authentication.** A buyer is whatever name they type; the brief asks for an identifier, not accounts. The order lookup requires a buyer filter so it cannot list everyone.
+- **Rate limits are per API instance**, so N instances allow N× the configured rate. A shared counter would put a store on every request; the bounded queue and the claim are what actually protect the sale.
+- **The viewer count is approximate** — it converges within a few seconds, and a buyer connected to two instances counts twice. It is decorative.
+- **One broker locally.** Production would run the quorum queue on a three-node cluster (PLAN §5.1); Compose runs one node to keep the first run fast.
+- **One sale at a time**, configured by `SALE_ID`.
 
-The consequence a client must handle: if two tabs each attempt, every tab sees both outcomes — one `confirmed` and one `already_purchased` — and a client keying on the newest event would flip between them. **Both carry the same `orderId`**, so a client should key on that rather than on which attempt won. The two statuses mean the same thing to a user: you hold an order.
+## Repository
 
-The viewer count is distinct users rather than sockets, so three tabs are one viewer. That dedupes within an instance only — the same user connected to two instances counts twice, which closing would need the shared registry this design avoids.
+| Path | What it is |
+| --- | --- |
+| `apps/api` | Fastify API and Socket.IO gateway; serves the built frontend |
+| `apps/worker` | Queue consumer and the batched claim; migrations and seed |
+| `apps/web` | React frontend (Vite) |
+| `packages/core` | Contracts and rules shared with the browser |
+| `packages/messaging` | RabbitMQ topology, publishing and consuming — server only |
+| `tests/` | `integration/`, `e2e/` (Playwright), `stress/` (k6) |
+| `scripts/` | `pnpm dev`, the E2E and stress orchestration, the licence gate |
+| `docs/` | `PLAN.md` (design), `DEVELOPMENT.md`, `prototype/` (the spikes behind the measurements) |
 
-## Conventions
+| Command | Does |
+| --- | --- |
+| `pnpm dev` | the whole stack, with watching |
+| `pnpm verify` | everything CI's gate runs: format, lint, typecheck, tests, licences, audit |
+| `pnpm test` / `pnpm test:e2e` / `pnpm stress <scenario>` | the three test layers |
+| `pnpm build` | TypeScript project build, then the web bundle |
+| `pnpm migrate` / `pnpm seed` | schema, and a sale to buy from |
 
-`CLAUDE.md` holds the housekeeping rules — lint and format gate every commit, no copyleft or known-vulnerable dependencies, one PR at a time. They are enforced in CI, not by convention.
-
-Two worth knowing up front:
-
-- **Every instant is UTC** from the database to the API boundary, and is localized only in the browser (`docs/PLAN.md` §9.1). CI runs the test suite twice, once under a non-UTC timezone, because a suite that only passes in UTC cannot catch code that depends on the process's local zone.
-- **TypeScript is held at 6.0.x**, because `typescript-eslint` peers at `<6.1.0` and TypeScript 7 is already published. Revisit when that peer range moves.
+Housekeeping rules live in `CLAUDE.md` and are enforced in CI: lint and format gate every commit, no copyleft or known-vulnerable dependencies, every instant UTC until the browser localises it.
