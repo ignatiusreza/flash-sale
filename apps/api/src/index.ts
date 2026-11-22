@@ -51,6 +51,7 @@ async function main(): Promise<void> {
     saleCache,
     saleId: config.SALE_ID,
     rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
+    lookupLimitPerMinute: config.ORDER_LOOKUP_LIMIT_PER_MINUTE,
     publish: (attempt) => publishAttempt(channel, queue, attempt),
     logger: true,
     ...(config.WEB_ROOT ? { webRoot: config.WEB_ROOT } : {}),

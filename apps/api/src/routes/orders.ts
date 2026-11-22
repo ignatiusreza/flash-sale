@@ -74,6 +74,7 @@ const indexSchema = {
         },
       },
     },
+    429: errorResponse,
   },
 } as const;
 
@@ -96,9 +97,12 @@ export const orderRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) => 
     },
   ]);
 
+  // Per address only: the lookup names a user, but any client may name any.
+  const lookupLimited = rateLimit(app, [{ max: deps.lookupLimitPerMinute ?? 120 }]);
+
   app.get<{ Querystring: { userId: string } }>(
     '/api/orders',
-    { schema: indexSchema },
+    { schema: indexSchema, preHandler: lookupLimited },
     async (request) => {
       const order = await findOrder(deps.pool, deps.saleId, request.query.userId);
       return order ? [order] : [];

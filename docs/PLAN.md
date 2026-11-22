@@ -25,7 +25,7 @@ Everything below optimises for making those three legible.
 | 5 | React frontend | — | Vite + React + Socket.IO client |
 | 6 | System diagram | — | Mermaid in README |
 
-Invariants 2 and 3 get **two independent enforcers**: the worker's in-memory state for speed, and database constraints as the durable backstop. If the worker is ever wrong, Postgres refuses the write and we get an alert instead of an oversold product.
+Invariants 2 and 3 get **two independent enforcers**: the claim statement (§4.1), and database constraints as the durable backstop. If the claim is ever wrong, Postgres refuses the write and we get an alert instead of an oversold product. *(Revised after review, issue #11: the first draft named the worker's in-memory state as the first enforcer; the worker holds none — §3.)*
 
 ### 2.2 Ambiguities, and the decisions I am taking
 
@@ -85,7 +85,7 @@ flowchart TB
 - **API (Fastify + Socket.IO).** Rejects what it can for free (§6), publishes the rest to RabbitMQ with publisher confirms, and holds the user's WebSocket. Horizontally scalable; the only state it holds is its own socket map.
 - **RabbitMQ.** Carries purchase *attempts* (requests, not decisions) on a durable, length-bounded **quorum** queue with `x-single-active-consumer`, replicated across a three-node cluster (§5.1), and carries results, sellout and presence back on a fanout exchange.
 - **Worker.** The sole writer. Batches claims into single-statement transactions and publishes each outcome to the fanout after the commit. Holds no state of its own: stock is read under the claim's lock.
-- **Postgres.** System of record and the durable enforcer of both invariants. Chosen over MongoDB on measurement, not habit: [`prototype/postgres-vs-mongo/`](./prototype/postgres-vs-mongo/) puts it 3–7× faster at equal fairness, and finds that MongoDB has no `FOR UPDATE SKIP LOCKED` equivalent — so it must trade arrival-order fairness for throughput, while Postgres gets both.
+- **Postgres.** System of record and the durable enforcer of both invariants. Chosen over MongoDB on measurement, not habit: [`prototype/postgres-vs-mongo/`](./prototype/postgres-vs-mongo/) puts it 3–7× faster at equal fairness, and finds that MongoDB has no `FOR UPDATE SKIP LOCKED` equivalent — so it must trade arrival-order fairness for throughput, while Postgres gets both. *(Qualified after review, issue #11: the counter design that was built never uses `SKIP LOCKED`; that half of the argument applies only if stock moves to the pool model, §16 q5. The measured speed and the transactional `CHECK` and `UNIQUE` backstops are what carry it today.)*
 
 **Why the queue, and not a distributed cache making the decision:** the alternative I costed first was an atomic Redis Lua script granting stock synchronously, with a stream handing off to a persistence worker. It is faster (§13) but strictly worse on correctness: a grant lives in Redis before it reaches Postgres, so a crash in that window means a user was told "confirmed" and holds nothing. In the design below, a result is only ever published **after** the transaction commits — the system never tells a user something false. The spike that evaluated it is kept at [`prototype/redis-grant/`](./prototype/redis-grant/).
 
@@ -154,6 +154,8 @@ Three properties, each load-bearing and each verified in §4.4:
 1. **It decrements by rows *actually inserted*, not by batch size.** This is what makes a redelivered batch a no-op: on redelivery every user already has an order, `ins` returns zero rows, and the decrement is zero. The obvious alternative — `remaining - array_length($2)` — would double-decrement on every redelivery and silently destroy stock. Since RabbitMQ delivery is at-least-once, this is not a hypothetical.
 2. **Places go to buyers who can win, in arrival order.** When a batch straddles sellout, the earliest arrivals win. The brief asks for fairness; this is where it is implemented. Each buyer is ranked once, at their first entry, and only if they hold no order yet.
 
+   "Arrival" means arrival at the broker. With several API instances, attempts reach the queue in the order their publishes do, which need not be the order the requests reached the APIs; nothing upstream of the queue imposes one. A batch that fails is held and retried in place (§5), so it keeps its place rather than letting later attempts be claimed first.
+
    *Revised after review (issue #11).* The first version ranked every entry, `ord <= remaining`. A buyer who already held an order, or a second entry for the same buyer, then took a place but no stock, and someone behind them was told `sold_out` while units remained: with 2 left, `[dave, dave, erin]` granted dave, refused erin, and left 1. Those are exactly a redelivered batch, a double submit and a second tab. The existing-order check reads the statement's snapshot, so if a second worker commits while this one waits on the lock, a place can still go unused; the worker then claims again for anyone it would otherwise refuse while stock remains.
 3. **Duplicates inside one batch cost one unit, not several.** `ON CONFLICT DO NOTHING` tolerates the same user appearing twice in a single statement, and because the decrement follows the insert count, stock stays correct.
 
@@ -190,16 +192,13 @@ async function flush() {
   pending = [];
   if (batch.length === 0) return;
 
-  // In-memory pre-filter: never ask the database about a user we know holds
-  // an order, and never ask at all once we know stock is gone.
-  const { candidates, rejected } = prefilter(batch, state);
-
-  const winners = candidates.length ? await claimBatch(saleId, candidates) : [];
-
-  channel.ack(batch[batch.length - 1], /* allUpTo */ true);   // AFTER commit
-  publishResults(batch, winners, rejected);                   // one fanout message
+  const results = await handleBatch(saleId, batch);            // claim: one statement, committed
+  publishResults(results);                                      // one fanout message, after the commit
+  channel.ack(batch[batch.length - 1], /* allUpTo */ true);     // and the ack last
 }
 ```
+
+*Revised after review (issue #11).* The first sketch pre-filtered against in-memory worker state, which was never built (§3), and acked before publishing the results. The code publishes, then acks: a crash between the two redelivers the batch, whose replay answers `already_purchased` with the same order — a duplicate result, never a lost one. It also retries a failing batch in place and caps each batch at `BATCH_MAX`, both described in §5.
 
 Four things that are easy to get wrong:
 
@@ -291,7 +290,9 @@ For the exercise itself, `docker-compose.yml` runs a single broker so the review
 
 Most flash-sale traffic is doomed, and the cheapest request is the one that never gets published. Three filters at the API layer, in increasing cost:
 
-1. **Window check — free.** `startAt`/`endAt` are static config, so the entire pre-sale rush and everything after the end is rejected in process with zero I/O.
+1. **Window check — free.** `startAt`/`endAt` come with the cached sale row (filter 3), so the entire pre-sale rush and everything after the end is rejected in process with zero I/O.
+
+   *Revised after review (issue #11).* Not static config, as first written: they are read from the database. Review also pointed out three clocks judging the window — the API host's here, the database's `now()` in the claim, and the worker's when it labels a refusal. **This assumes every host is NTP-synchronised**, which keeps them within milliseconds of each other, well inside the second the cache may be stale anyway. Two things make the edges safe on that assumption: within a second of either edge the cache admits and leaves the claim to judge, so it can never wrongly refuse; and the worker labels a refusal `not_started` or `ended` by the claim's own `now()`, so the label always matches the decision. Tracking the database's clock in the API was considered and left out — it would only help a host whose NTP is broken, which breaks far more than this.
 2. **Sellout flag — one message, then free.** When the worker takes the last unit it publishes `SOLD_OUT` once to the fanout; every API instance sets a local boolean and rejects in memory from then on. This is safe because **sellout is monotonic**: it only ever flips one way, and only the sole writer can flip it. A stale flag can only ever be wrong in the harmless direction (enqueueing a doomed attempt that the worker rejects), never in the direction that wrongly rejects a buyer.
 
    *Not built (noted in phase 8).* Filter 3's one-second refresh alone proved enough: in the stress run, everything after sellout except the attempts arriving within that second was refused from cache — 208 000 of 233 000. The message would shorten that window from a second to milliseconds; the reasoning below about monotonicity applies to the refreshed value just the same.
@@ -305,16 +306,20 @@ Deliberately **not** filtered at the API layer: "already purchased". It needs a 
 
 Rate limiting still applies on top: a per-IP and per-user token bucket, rejecting with `429`. Not in the brief, but an endpoint this attractive without a limiter is a conspicuous omission.
 
+The order lookup, `GET /api/orders`, is limited too — per IP, at 120 a minute by default (`ORDER_LOOKUP_LIMIT_PER_MINUTE`), since a client looks itself up on every connect. *Added after review (issue #11):* it queried Postgres on every call with no limit, so any client could turn it into load on the database the worker claims against. What a limit does not stop is many clients at once — an API instance dying sends all its clients to re-sync together. That herd is spread by Socket.IO's randomised reconnect backoff, and each lookup is one probe of the `(sale_id, user_id)` unique index.
+
 The limiter is `@fastify/rate-limit`, whose default store is **in process, not shared**, so the effective limit across N instances is N times the configured one. That is a real weakening and it is stated rather than hidden: a shared counter would need a store on the path of every request, and this design deliberately has none. The limiter exists to blunt a single abusive client; the bounded queue (§5) and the claim (§4) are what actually protect the sale, and neither depends on it.
 
 ## 7. API surface
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/api/sale` | `{ status, availability, startAt, endAt, serverTime, viewers }` |
+| `GET` | `/api/sale` | `{ status, availability?, startAt, endAt, serverTime }` — the viewer count is pushed over the socket, not returned here |
 | `POST` | `/api/orders` | create: `202 { status: "queued", attemptId }` + `Location: /api/orders?userId=` · `409 { status: sold_out\|not_started\|ended }` · `429` · `503` |
-| `GET` | `/api/orders?userId=` | index, filtered: `200 [{ orderId, purchasedAt }]` — zero or one entries · `400` without the filter — reconnect source of truth |
-| `GET` | `/healthz` `/readyz` `/metrics` | liveness, readiness, Prometheus |
+| `GET` | `/api/orders?userId=` | index, filtered: `200 [{ orderId, purchasedAt }]` — zero or one entries · `400` without the filter · `429` — reconnect source of truth |
+| `GET` | `/healthz` `/readyz` | liveness, readiness |
+
+*Revised after review (issue #11).* `/metrics` with `prom-client` was planned here and in §12 and never built; the routes table and the README list what exists.
 
 Orders are a REST resource with `index` and `create`. `new`/`edit` are server-rendered forms an SPA does not need; an order is immutable once claimed, so no `update`/`destroy` (cancellation arrives with payment, §15.2). A reconnecting client knows its user but not its order id, so it asks for the user's orders — a filtered `index`, not a `show` keyed by something other than the order's id. The filter is required: unfiltered, `index` would expose every buyer while there is no authentication. Nothing needs `show` yet; it would be `GET /api/orders/:orderId`. `create` answers `202 Accepted` rather than `201 Created` because the order is decided asynchronously, and its `Location` is the filtered index the order will appear in.
 
@@ -322,11 +327,13 @@ WebSocket events pushed to the client:
 
 | Event | Payload |
 |---|---|
-| `purchase:result` | `{ attemptId, status: confirmed\|already_purchased\|sold_out, orderId? }` |
-| `sale:status` | `{ status, availability }` — broadcast on change |
+| `purchase:result` | `{ attemptId, userId, status: confirmed\|already_purchased\|sold_out\|not_started\|ended, orderId? }` — to the user's sockets only |
+| `sale:status` | `{ status, availability?, startAt, endAt }` — on connect, then on change |
 | `sale:viewers` | `{ count }` — aggregated presence, every few seconds |
 
 `GET /api/sale` is cached in process and refreshed on the same 1 s timer as the sellout check, so the highest-volume endpoint costs no I/O per request. `serverTime` is returned so the frontend countdown does not trust the client clock.
+
+A socket may connect without a `userId`: a visitor who has not typed a name yet still gets `sale:status` and `sale:viewers`, and counts as a viewer, but no `purchase:result` is routed to it. *(Revised after review, issue #11: such sockets were refused, so the page sat on "upcoming" until a name was typed.)*
 
 Every timestamp in these payloads — `startAt`, `endAt`, `serverTime`, `purchasedAt` — is ISO 8601 UTC with an explicit `Z` suffix, per §9.1. The API never emits a local time and never accepts one.
 
@@ -366,7 +373,7 @@ CREATE TABLE orders (
 
 `CHECK (remaining >= 0)` is the durable anti-oversell backstop: even a logic bug cannot drive stock negative, because Postgres will abort the transaction. Combined with the `UNIQUE` constraint, both headline invariants are enforced by the database independently of any application code.
 
-The worker rebuilds its in-memory state on startup or promotion with two queries — `SELECT remaining FROM sales` and `SELECT user_id FROM orders WHERE sale_id = $1`. Both are bounded by `totalStock`, so promotion is fast.
+The worker holds no state between batches (§3): stock is read under the claim's lock and existing orders are looked up per batch, so a promoted worker has nothing to rebuild. *(Revised after review, issue #11: the first draft had it rebuild in-memory stock and buyer sets on promotion.)*
 
 ### 9.1 Time handling
 
@@ -378,14 +385,14 @@ What is not automatic is the session zone, so it gets pinned in three places: `t
 
 Two consequences of `now()` worth knowing:
 
-- It returns transaction start time, not wall clock. In a batched claim (§4.1) **all 100 rows share one `created_at`**, so `created_at` cannot break ties within a batch. Ordering within a batch comes from `id`, which is why §4.1 allocates by `ord` rather than by timestamp.
+- It returns transaction start time, not wall clock. In a batched claim (§4.1) **every row of a batch shares one `created_at`**, so `created_at` cannot break ties within a batch — and neither can `id`, a random UUID. Order within a batch is the arrival order `ord`, which decides who wins at claim time and is not stored. *(Revised after review, issue #11: this said ordering came from `id`.)*
 - `clock_timestamp()` is the one that advances inside a transaction, and is wrong for `created_at` precisely because it would make rows in one commit disagree.
 
 **At the API boundary.** Every timestamp crosses as ISO 8601 with an explicit `Z` — `2026-11-20T10:00:00.000Z`. `JSON.stringify` already calls `toISOString()` on a `Date`, so the default is correct provided nothing hand-formats on the way out. No epoch integers (ambiguous units), no bare local strings, no offsets other than `Z`. Sale configuration is accepted the same way: an absolute instant, never a wall-clock reading plus an implied zone. Configuring in UTC also sidesteps the spring-forward case where the configured local time does not exist.
 
 **In the browser.** Parse to a `Date` and render with `Intl.DateTimeFormat`, using the zone and locale the browser resolves. Never assemble a string from `getHours()` and friends — that skips locale conventions and the 12/24-hour preference. Include `timeZoneName: 'short'`, because a user needs to know *which* zone the sale opens in, not just a number.
 
-**Clock skew and timezone are different problems, and only one of them is ours.** A browser with the wrong *timezone* still has a correct `Date.now()`, because the OS holds UTC underneath — so a timezone misconfiguration only ever corrupts display. A browser with a wrong *clock* has a wrong instant, which would corrupt a countdown. That is what `serverTime` is for (§10): take `offset = serverTime - Date.now()` on each poll and drive the countdown from `Date.now() + offset`, so the countdown stays right even on a device that is minutes out. The window check itself is never client-side, so a skewed clock can only ever mislead the user, never admit them early.
+**Clock skew and timezone are different problems, and only one of them is ours.** A browser with the wrong *timezone* still has a correct `Date.now()`, because the OS holds UTC underneath — so a timezone misconfiguration only ever corrupts display. A browser with a wrong *clock* has a wrong instant, which would corrupt a countdown. That is what `serverTime` is for (§10): take `offset = serverTime - midpoint`, where `midpoint` is halfway between sending the request and receiving the answer, and drive the countdown from `Date.now() + offset`, so the countdown stays right even on a device that is minutes out. The page re-measures on every connect. *(Revised after review, issue #11: the first build took the arrival time, running a one-way trip ahead, and measured once.)* The window check itself is never client-side, so a skewed clock can only ever mislead the user, never admit them early.
 
 ## 10. Frontend
 
@@ -487,7 +494,7 @@ docs/
 docker-compose.yml   README.md
 ```
 
-pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. ESLint flat config with `typescript-eslint` for correctness, Prettier for formatting and nothing else, `tsc --noEmit` under `strict`, `pnpm audit --audit-level=high`, and a licence allowlist check — all five gating CI rather than advisory, per [`CLAUDE.md`](../CLAUDE.md). Every runtime dependency named above is MIT or Apache-2.0, so the allowlist costs nothing to satisfy; it exists to catch what arrives transitively. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
+pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. ESLint flat config with `typescript-eslint` for correctness, Prettier for formatting and nothing else, `tsc --noEmit` under `strict`, `pnpm audit --audit-level=high`, and a licence allowlist check — all five gating CI rather than advisory, per [`CLAUDE.md`](../CLAUDE.md). Every runtime dependency named above is MIT or Apache-2.0, so the allowlist costs nothing to satisfy; it exists to catch what arrives transitively. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
 
 ### 12.1 Serving the frontend — decided in phase 5, revised on review: the API serves it
 
@@ -616,7 +623,7 @@ One operational note: payment concurrency is capped by the PSP's own rate limit,
 
 Nothing here blocks a start; each has a stated default I will proceed under.
 
-1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with in-memory adapters for the queue and store so unit tests run with no containers.*
+1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with in-memory adapters for the queue and store so unit tests run with no containers.* *As built:* no in-memory adapters — the integration suites run against a real Postgres and RabbitMQ (on the host, or Compose's), and skip themselves when neither is reachable, so a bare `pnpm test` stays green with only the unit tests. A fake broker would have hidden exactly the delivery-limit, ordering and redelivery behaviour issue #11 turned on.
 2. **How long is the exercise meant to take?** The phasing above is ~20 hours. *Default: build phases 0–6 and 8 to a high standard, then 7 as time allows.*
 3. ~~**Should the stress test run in CI?**~~ **Decided in phase 7: no, manual, with results in the README.** It needs sustained load and will be slow and noisy on shared runners. *Default: unit, integration, the two invariant tests and the Playwright suite all run in CI — the E2E layer is slow in wall-clock terms but not load-sensitive, so it is reliable on a shared runner in a way k6 is not. The full k6 run stays manual, with its results committed.*
 4. ~~**How large is the batch window?**~~ **Decided in phase 8: up to 500 claims, 5 ms flush, `CLAIM_BATCH_MAX` to override.** Draining the worker path measured ~31 000 claims/s at 100, ~40 000 at 250, ~44 000 at 500 and ~53 000 at 1000: handle time grows slower than batch size, because the fsync and the round trip are per batch. End to end, the `capacity` stress run went from ~8 000 attempts/s with 241 000 shed at 100 to ~18 000/s with none shed at 500, at the same offered load. Latency did not move — alternating `sale` runs gave result p99 32–40 ms at 100 and 35–42 ms at 500 — because the size-or-time trigger keeps batches small whenever load is light. 500 rather than 1000 keeps a redelivered batch, and the prefetch of twice that, modest.

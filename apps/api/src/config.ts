@@ -24,6 +24,13 @@ const schema = z.object({
   SALE_REFRESH_MS: z.coerce.number().int().positive().default(1000),
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(60),
   /**
+   * Per address, for `GET /api/orders`. Higher than purchases: a client looks
+   * itself up on every connect, and a reconnect or a refresh is legitimate.
+   * It is there so one client cannot turn the lookup into load on the database
+   * the worker claims against.
+   */
+  ORDER_LOOKUP_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(120),
+  /**
    * Directory of the built SPA. Unset, this is a pure API process and serving
    * the frontend is someone else's job — a CDN, or another route on the
    * gateway (docs/PLAN.md §12.1).

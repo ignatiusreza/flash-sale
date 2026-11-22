@@ -39,12 +39,6 @@ export class SocketRegistry {
     return sockets.size;
   }
 
-  broadcast(event: string, payload: unknown): void {
-    for (const sockets of this.#byUser.values()) {
-      for (const socket of sockets) socket.emit(event, payload);
-    }
-  }
-
   /** Sockets held, not distinct users: two tabs count twice. */
   get connections(): number {
     let total = 0;

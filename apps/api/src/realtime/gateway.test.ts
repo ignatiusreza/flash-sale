@@ -107,18 +107,24 @@ describe('realtime gateway', () => {
     });
   });
 
-  it('refuses a socket that does not say who it is', async () => {
-    // Nothing could ever be routed to it, so holding the connection is worse
-    // than refusing: the client would wait for results that cannot arrive.
-    // Refused during the handshake, so the client sees `connect_error` rather
-    // than connecting and being dropped for no stated reason.
+  it('lets a visitor without a name watch, but routes them no results', async () => {
+    // A page before its visitor has typed a name: it must still see the sale
+    // open, close or sell out, and the count of people here includes them.
     const anonymous = await client();
+    const greeted = once<{ status: string }>(anonymous, 'sale:status');
+    await once(anonymous, 'connect');
 
-    const error = await once<Error>(anonymous, 'connect_error');
-
-    expect(error.message).toBe('userId required');
-    expect(anonymous.connected).toBe(false);
+    expect((await greeted).status).toBe('active');
     expect(gateway.registry.connections).toBe(0);
+
+    let heard = 0;
+    anonymous.on('purchase:result', () => heard++);
+    gateway.handleResults({
+      saleId: 'flash',
+      results: [{ attemptId: 'a1', userId: 'someone', status: 'sold_out' }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(heard).toBe(0);
   });
 
   it('counts both tabs of one user, and forgets them on disconnect', async () => {

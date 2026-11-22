@@ -1,6 +1,20 @@
+import { fileURLToPath } from 'node:url';
+
 import { defineConfig } from 'vitest/config';
 
+const source = (pkg: string) =>
+  fileURLToPath(new URL(`./packages/${pkg}/src/index.ts`, import.meta.url));
+
 export default defineConfig({
+  // The workspace packages export their built `dist/`, which a fresh clone
+  // does not have: tests read their sources instead, so `pnpm test` needs no
+  // build first and never tests a stale one.
+  resolve: {
+    alias: {
+      '@flash-sale/core': source('core'),
+      '@flash-sale/messaging': source('messaging'),
+    },
+  },
   test: {
     // One Postgres and one RabbitMQ are shared by every suite, so running files
     // in parallel means competing for connections and broker resources. The

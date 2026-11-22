@@ -14,6 +14,8 @@ export interface ServerDeps {
   readonly saleCache: SaleCache;
   readonly saleId: string;
   readonly rateLimitPerMinute: number;
+  /** Per address, for the order lookup; see `config.ts`. Defaults to 120. */
+  readonly lookupLimitPerMinute?: number;
   /** Publishes an attempt and resolves only once the broker confirms it. */
   readonly publish: (attempt: Parameters<typeof publishAttempt>[2]) => Promise<void>;
   readonly logger?: boolean;
