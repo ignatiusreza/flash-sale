@@ -28,14 +28,29 @@ describe('admit', () => {
     expect(admit(sale, at(END, 60_000))).toEqual({ admit: false, reason: 'ended' });
   });
 
-  // The cache only estimates the database's clock, and the claim is the
-  // authority: this close to an edge, refusing could be wrong, while
-  // admitting costs at most one queued attempt.
-  it('admits near either edge, for the claim to judge', async () => {
+  // Just before the open, or just after the close, this host may disagree with
+  // the database's clock the claim judges by: refusing there could be wrong.
+  it('admits only in the grace just before the open and just after the close', async () => {
     const sale = await cache();
 
     expect(admit(sale, at(START, -EDGE_GRACE_MS / 2))).toEqual({ admit: true });
     expect(admit(sale, at(END, EDGE_GRACE_MS / 2))).toEqual({ admit: true });
+  });
+
+  // The pre-sale rush is the busiest moment, and must still be refused from
+  // memory up to the grace — not for a whole second before the open.
+  it('still refuses the pre-sale rush outside that grace', async () => {
+    const sale = await cache();
+
+    expect(admit(sale, at(START, -500))).toEqual({ admit: false, reason: 'not_started' });
+    expect(admit(sale, at(END, 500))).toEqual({ admit: false, reason: 'ended' });
+  });
+
+  it('refuses a sold-out sale on either side of the close, grace or not', async () => {
+    const sale = await cache(0);
+
+    expect(admit(sale, at(END, -EDGE_GRACE_MS / 2))).toEqual({ admit: false, reason: 'sold_out' });
+    expect(admit(sale, at(END, EDGE_GRACE_MS / 2))).toEqual({ admit: false, reason: 'sold_out' });
   });
 
   it('refuses a sold-out sale inside its window', async () => {

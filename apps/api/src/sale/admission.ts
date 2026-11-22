@@ -5,12 +5,15 @@ export type Admission =
   | { readonly admit: false; readonly reason: 'not_started' | 'ended' | 'sold_out' };
 
 /**
- * Near a window edge the cache is not good enough to refuse on: it is up to a
- * refresh old, and this host's clock is not the database's `now()` the claim
- * judges by — NTP keeps them within milliseconds, not to the instant. So
- * attempts this close are left to the claim.
+ * How long before the open, and after the close, the cache admits rather than
+ * refuses. Those are the only places a refusal could be wrong: this host
+ * thinks the sale not yet open, or over, while the database's `now()` — the
+ * claim's clock — already, or still, has it open. NTP keeps the two within
+ * milliseconds; the window's times do not change between refreshes, so the
+ * cache's staleness does not widen it. Just enough to cover skew, so the
+ * pre-sale rush is still refused for free up to its last instant (issue #17).
  */
-export const EDGE_GRACE_MS = 1_000;
+export const EDGE_GRACE_MS = 100;
 
 /**
  * Decides whether an attempt is worth queueing at all (docs/PLAN.md §6).
@@ -25,8 +28,8 @@ export const EDGE_GRACE_MS = 1_000;
  * Both are optimisations, never the authority: the claim re-checks stock and
  * the window durably, so a stale cache can only ever cost a wasted enqueue.
  * It must not be able to wrongly *reject*, which is why a missing snapshot
- * admits rather than refuses, and an attempt within `EDGE_GRACE_MS` of
- * either edge is admitted for the claim to judge.
+ * admits rather than refuses, and the moments either side of the window —
+ * `EDGE_GRACE_MS` — are left to the claim.
  */
 export function admit(cache: SaleCache, now = new Date()): Admission {
   const view = cache.view(now);
@@ -36,13 +39,23 @@ export function admit(cache: SaleCache, now = new Date()): Admission {
   // closed would reject real buyers during a database blip.
   if (!view) return { admit: true };
 
-  const nearEdge = [view.startAt, view.endAt].some(
-    (edge) => Math.abs(now.getTime() - Date.parse(edge)) < EDGE_GRACE_MS,
-  );
-  if (nearEdge) return { admit: true };
+  const time = now.getTime();
+  if (view.status === 'upcoming') {
+    return time >= Date.parse(view.startAt) - EDGE_GRACE_MS
+      ? { admit: true }
+      : { admit: false, reason: 'not_started' };
+  }
 
-  if (view.status === 'upcoming') return { admit: false, reason: 'not_started' };
-  if (view.status === 'ended') return { admit: false, reason: 'ended' };
-  if (view.availability === 'sold_out') return { admit: false, reason: 'sold_out' };
+  // Before the close's grace: with nothing left, there is nothing to win
+  // either side of it.
+  if (view.availability === 'sold_out' || cache.snapshot?.remaining === 0) {
+    return { admit: false, reason: 'sold_out' };
+  }
+
+  if (view.status === 'ended') {
+    return time < Date.parse(view.endAt) + EDGE_GRACE_MS
+      ? { admit: true }
+      : { admit: false, reason: 'ended' };
+  }
   return { admit: true };
 }

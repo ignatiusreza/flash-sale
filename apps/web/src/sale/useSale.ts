@@ -13,6 +13,9 @@ export interface SaleSnapshot {
   readonly endAt: string;
 }
 
+/** How often an open page re-measures its offset from the server's clock. */
+const REMEASURE_MS = 5 * 60_000;
+
 /**
  * Keeps the page in step with the sale.
  *
@@ -27,8 +30,9 @@ export function useSale(socket: Socket): {
   const [sale, setSale] = useState<SaleSnapshot | undefined>();
   const [offsetMs, setOffsetMs] = useState(0);
 
-  // On arrival, and again on every connect: the offset drifts, and after a
-  // disconnect the snapshot may be stale.
+  // On arrival, on every connect, and every few minutes between: the offset
+  // drifts, and after a disconnect the snapshot may be stale. A page left open
+  // on one long connection would otherwise keep its first measurement.
   useEffect(() => {
     let cancelled = false;
 
@@ -51,10 +55,12 @@ export function useSale(socket: Socket): {
     };
     load();
     socket.on('connect', load);
+    const remeasure = setInterval(load, REMEASURE_MS);
 
     return () => {
       cancelled = true;
       socket.off('connect', load);
+      clearInterval(remeasure);
     };
   }, [socket]);
 
