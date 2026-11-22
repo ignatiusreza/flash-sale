@@ -71,6 +71,19 @@ It assumes each service's stock local credentials, and either can be overridden 
 
 If one is not reachable, `pnpm dev` says which and stops, rather than hanging.
 
+### Environments
+
+`APP_ENV` says whose data a process works on, and each environment gets its own on every service — a database in Postgres, a queue and exchange in RabbitMQ — so they can share one Postgres and one broker without touching each other:
+
+| Run | `APP_ENV` | Database | Queue / exchange |
+| --- | --- | --- | --- |
+| `pnpm dev` | `development` | `flashsale_development` | `development.purchase.attempts` / `development.flash-sale.events` |
+| `pnpm test` | `test` | `flashsale_test` | a queue per test, deleted after it |
+| `pnpm test:e2e` | `e2e` | `flashsale_e2e` | `e2e.purchase.attempts` / `e2e.flash-sale.events` |
+| deployed | `production` (default) | whatever `DATABASE_URL` names | `purchase.attempts` / `flash-sale.events` |
+
+It is not `NODE_ENV`, which says how code runs — build mode, React's dev checks. The two vary independently: E2E runs production code against test data. RabbitMQ virtual hosts would be the more literal split, but creating one needs broker admin rights, while queues and exchanges are declared on first use.
+
 ### Using the Compose services instead
 
 Without local services, Compose provides both — on non-default ports, so they never clash with ones you do have. Start them and point `pnpm dev` at them via `.env`:
@@ -100,6 +113,7 @@ There are only two application services, `api` and `worker`. The API serves the 
 | `PORT` | `3000` | API port |
 | `WEB_ROOT` | — | directory of the built SPA; unset, the process is a pure API |
 | `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
+| `APP_ENV` | `production` | whose data: names the RabbitMQ queue and exchange — see [Environments](#environments) |
 | `ENABLE_TEST_ENDPOINTS` | `false` | registers the E2E reset endpoint; never in a deployed environment |
 | `SEED_STOCK` | `100` | units in the seeded sale |
 | `SEED_DURATION_MINUTES` | `60` | how long it stays open |
@@ -163,7 +177,7 @@ pnpm exec playwright install chromium   # once
 pnpm test:e2e
 ```
 
-Playwright starts its own stack and tears it down: it builds the app, then runs the API (serving the built SPA, as in production) on `:3100` and a worker, against the same local services as `pnpm dev` but a separate `flashsale_e2e` database. Stop `pnpm dev` first — its worker would consume the suite's purchase attempts, so the E2E server refuses to start while anything else is consuming them, and says so.
+Playwright starts its own stack and tears it down: it builds the app, then runs the API (serving the built SPA, as in production) on `:3100` and a worker, as `APP_ENV=e2e` — the same local services as `pnpm dev`, but its own database and queues (see [Environments](#environments)), so it runs happily beside a `pnpm dev`. It takes service locations from the shell only, never from `.env`: a `DATABASE_URL` there names your development database, and the suite's reset endpoint would wipe its orders.
 
 Each spec seeds its own sale through `POST /api/test/sale`, which exists only when the API runs with `ENABLE_TEST_ENDPOINTS=true` — the E2E server sets it, no deployed environment ever should. Specs run one at a time, because there is one sale; there are no retries, because a flaky suite trains people to re-run red builds. When a spec fails, the Socket.IO frames it saw are attached to the report, which separates "the server never sent it" from "the page ignored it".
 

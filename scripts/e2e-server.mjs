@@ -5,55 +5,20 @@
  * Production-shaped on purpose — E2E should exercise the serving path that
  * ships, not the Vite dev server.
  *
- * It uses its own database, and the API registers the test-only reset
- * endpoint (`ENABLE_TEST_ENDPOINTS`) so each spec can seed a fresh sale.
+ * It is `APP_ENV=e2e`: its own database and its own RabbitMQ queue and
+ * exchange, on its own port, so it runs beside `pnpm dev` on the same services
+ * without either touching the other's data. The API registers the test-only
+ * reset endpoint (`ENABLE_TEST_ENDPOINTS`), which wipes the sale's orders.
  */
-import { createRequire } from 'node:module';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-
-import { ROOT, supervisor } from './lib/stack.mjs';
+import { supervisor } from './lib/stack.mjs';
 
 const e2e = supervisor('e2e');
 const PORT = Number(process.env.PORT || 3100);
 
-/**
- * Refuses to start while anything else consumes the attempts queue. A
- * `pnpm dev` worker on the same broker would take the suite's attempts and
- * settle them against the development database, so every purchase in every
- * spec would hang on "queued" — failures that look exactly like real bugs.
- */
-async function refuseForeignConsumers(rabbitmqUrl) {
-  const fromWorker = createRequire(path.join(ROOT, 'apps/worker/package.json'));
-  const amqp = fromWorker('amqplib');
-  const { ATTEMPTS_QUEUE } = await import(
-    pathToFileURL(fromWorker.resolve('@flash-sale/messaging')).href
-  );
-
-  const connection = await amqp.connect(rabbitmqUrl);
-  try {
-    const channel = await connection.createChannel();
-    // A missing queue closes the channel with a 404; that is "no consumers".
-    channel.on('error', () => {});
-    const consumers = await channel
-      .checkQueue(ATTEMPTS_QUEUE)
-      .then((queue) => queue.consumerCount)
-      .catch(() => 0);
-
-    if (consumers > 0) {
-      e2e.say(`${consumers} consumer(s) already on ${ATTEMPTS_QUEUE} — is \`pnpm dev\` running?`);
-      e2e.say('  its worker would take the suite’s attempts; stop it, then retry');
-      process.exit(1);
-    }
-  } finally {
-    await connection.close().catch(() => {});
-  }
-}
-
-const env = await e2e.resolveServices({
-  DATABASE_URL: 'postgres://postgres@localhost:5432/flashsale_e2e',
-  RABBITMQ_URL: 'amqp://guest:guest@localhost:5672',
-});
+// Not `.env`: that is development configuration. A DATABASE_URL there names
+// the development database, and the reset endpoint would wipe its orders.
+// Service locations come from the shell (as CI provides them) or the defaults.
+const env = await e2e.resolveServices('e2e', { readEnvFile: false });
 await e2e.checkPorts(
   [['E2E API', PORT]],
   'is an earlier E2E run still going? Stop it, or free the port, then retry',
@@ -65,8 +30,6 @@ await e2e.run('pnpm', ['-s', 'build']);
 e2e.say('preparing the database…');
 await e2e.run('pnpm', ['-s', '--filter', '@flash-sale/worker', 'create-database'], env);
 await e2e.run('pnpm', ['-s', '--filter', '@flash-sale/worker', 'migrate'], env);
-
-await refuseForeignConsumers(env.RABBITMQ_URL);
 
 // In our process group, not their own: Playwright stops the web server by
 // SIGKILLing its group, and anything outside it would outlive the run and hold

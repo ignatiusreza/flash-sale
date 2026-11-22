@@ -3,6 +3,14 @@ import { z } from 'zod';
 const schema = z.object({
   DATABASE_URL: z.string().min(1),
   RABBITMQ_URL: z.string().min(1),
+  /**
+   * Which environment's data this process works on: `development`, `test`,
+   * `e2e` or `production`. Separate from NODE_ENV, which says how the code
+   * runs — E2E runs production code against test data. It prefixes the queue
+   * and exchange names (`topologyNames` in @flash-sale/messaging); production
+   * keeps the plain ones.
+   */
+  APP_ENV: z.string().default('production'),
   SALE_ID: z.string().min(1).default('flash'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),

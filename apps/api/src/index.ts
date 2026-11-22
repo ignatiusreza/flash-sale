@@ -30,7 +30,9 @@ async function main(): Promise<void> {
 
   const connection = await amqp.connect(config.RABBITMQ_URL);
   const channel = await connection.createConfirmChannel();
-  const { queue, exchange } = await assertTopology(channel);
+  const { queue, exchange } = await assertTopology(channel, {
+    environment: config.APP_ENV,
+  });
 
   const app = await buildServer({
     pool,

@@ -17,11 +17,7 @@ import { supervisor } from './lib/stack.mjs';
 
 const dev = supervisor('dev');
 
-const env = await dev.resolveServices({
-  // A local Postgres trusting its `postgres` user, and RabbitMQ's `guest`.
-  DATABASE_URL: 'postgres://postgres@localhost:5432/flashsale_development',
-  RABBITMQ_URL: 'amqp://guest:guest@localhost:5672',
-});
+const env = await dev.resolveServices('development');
 // After resolveServices, which loads `.env` and so any PORT override in it.
 await dev.checkPorts(
   [

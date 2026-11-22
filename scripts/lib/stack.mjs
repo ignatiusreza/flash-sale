@@ -69,16 +69,24 @@ export function supervisor(name) {
   }
 
   /**
-   * Resolves DATABASE_URL and RABBITMQ_URL: the shell first, then `.env`, then
-   * `defaults`. Exits, naming the service, if either cannot be reached.
+   * The environment for `APP_ENV` (development, test, e2e): its own database
+   * and its own RabbitMQ names, on whichever services it finds.
+   *
+   * DATABASE_URL and RABBITMQ_URL come from the shell first, then `.env` unless
+   * `readEnvFile` is false, then default to the local services with their stock
+   * credentials — Postgres's passwordless `postgres`, RabbitMQ's `guest` — and
+   * a database named for the environment. Exits, naming the service, if either
+   * cannot be reached.
    */
-  async function resolveServices(defaults) {
+  async function resolveServices(appEnv, { readEnvFile = true } = {}) {
     const envFile = path.join(ROOT, '.env');
-    if (existsSync(envFile)) process.loadEnvFile(envFile);
+    if (readEnvFile && existsSync(envFile)) process.loadEnvFile(envFile);
 
     const env = {
-      DATABASE_URL: process.env.DATABASE_URL || defaults.DATABASE_URL,
-      RABBITMQ_URL: process.env.RABBITMQ_URL || defaults.RABBITMQ_URL,
+      APP_ENV: appEnv,
+      DATABASE_URL:
+        process.env.DATABASE_URL || `postgres://postgres@localhost:5432/flashsale_${appEnv}`,
+      RABBITMQ_URL: process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
     };
 
     const pg = new URL(env.DATABASE_URL);
@@ -98,7 +106,7 @@ export function supervisor(name) {
     }
     if (!pgUp || !mqUp) process.exit(1);
 
-    say(name, `postgres ${pg.host}${pg.pathname}, rabbitmq ${mq.host}`);
+    say(name, `environment ${appEnv}: postgres ${pg.host}${pg.pathname}, rabbitmq ${mq.host}`);
     return env;
   }
 

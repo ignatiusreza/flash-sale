@@ -19,6 +19,8 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   const rabbitUrl = process.env.RABBITMQ_URL;
   const saleId = process.env.SALE_ID ?? 'flash';
+  // Must match the API's: see APP_ENV in apps/api/src/config.ts.
+  const environment = process.env.APP_ENV ?? 'production';
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   if (!rabbitUrl) throw new Error('RABBITMQ_URL is required');
 
@@ -27,7 +29,7 @@ async function main(): Promise<void> {
 
   const connection = await amqp.connect(rabbitUrl);
   const channel = await connection.createConfirmChannel();
-  const { queue, exchange } = await assertTopology(channel);
+  const { queue, exchange } = await assertTopology(channel, { environment });
 
   const consumer = await startBatchConsumer({
     channel,
