@@ -28,7 +28,7 @@ export function App() {
         userId={userId}
         onIdentify={setUserId}
         purchaseState={purchaseState}
-        canPurchase={canPurchase(purchaseState, userId, sale)}
+        canPurchase={canPurchase(purchaseState, userId, sale, connected)}
         onPurchase={purchase}
       />
     </main>

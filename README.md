@@ -123,7 +123,7 @@ The `202` means *accepted*, not *bought*: the answer comes over the socket, typi
 
 Each is argued at length, with measurements, in `docs/PLAN.md`.
 
-1. **Asynchronous purchase: `202`, then the answer over a WebSocket** (PLAN §3). A synchronous claim per request means every request holds a database lock — measured as a lock convoy at 899 claims/s with 55 ms mean latency. Queueing turns the stampede into an orderly line. *The cost:* the client must handle an answer that arrives separately — reconnects, refreshes and several tabs all have to be designed for, and are tested.
+1. **Asynchronous purchase: `202`, then the answer over a WebSocket** (PLAN §3). A synchronous claim per request means every request holds a database lock — measured as a lock convoy at 899 claims/s with 55 ms mean latency. Queueing turns the stampede into an orderly line. *The cost:* the client must handle an answer that arrives separately — reconnects, refreshes, renames and several tabs all have to be designed for, and are tested. Holding the request until the worker replies was considered and not taken: under a full queue or a database outage the wait has no useful bound, so the separate-answer path would be needed anyway (PLAN §2.2).
 
 2. **One worker, settling claims in batches** (§4). A single active consumer means there is no race to arbitrate: correctness comes from the topology, not from locking. Batching is what makes one worker fast enough — 835 claims/s one at a time, ~37 000–41 500/s at 100 per single-statement transaction, because the fsync per commit is amortised. Batches go up to 500 (`CLAIM_BATCH_MAX`): under light load the 5 ms timer flushes first, so large batches only form in a rush, when throughput is what counts. *The cost:* that one consumer is the throughput ceiling (see [Scalability](#scalability)).
 
@@ -150,7 +150,7 @@ Each is argued at length, with measurements, in `docs/PLAN.md`.
 | Worker dies mid-batch | The transaction rolls back; the messages were never acked, so they are redelivered to the standby worker, which the broker promotes. |
 | Worker dies after commit, before ack | The batch is redelivered; the claim inserts nothing for buyers who already hold an order, so it is a no-op. |
 | API instance dies | Its sockets drop; clients reconnect to another instance and re-sync their order from `GET /api/orders`. Queued attempts are unaffected. |
-| A result is lost — socket down, or page refreshed mid-purchase | The page re-syncs after every reconnect; on a refresh it restores the attempt it was waiting on and still recognises the outcome. A result missed while no page was open is settled from the order lookup and the sale's state. |
+| A result is lost — socket down, or page refreshed mid-purchase | The page looks the buyer's order up every time its socket connects; on a refresh it restores the attempt it was waiting on. A lost win is found by that lookup; a lost rejection is settled from the sale once it has sold out or ended, and an attempt nobody decides is let go after two minutes. Buy stays disabled until the socket is connected, so no result is decided before there is somewhere to send it. |
 | Postgres down | The worker holds its batch unacked and retries it with backoff; the broker stops delivering, the queue fills to its bound, then the API sheds with `503`. When Postgres returns, every accepted attempt is claimed. Verified: 20 attempts accepted during an outage, all 20 orders once it ended. |
 | Traffic beyond capacity | The queue is bounded; past it the API answers `503` immediately instead of queueing without limit. Measured: every accepted attempt still became an order. |
 | A broker node dies | (Production topology.) The quorum queue elects a new leader within seconds; a confirm means a majority already held the message. |
@@ -169,8 +169,8 @@ The property under all of it: **nobody is told "confirmed" unless the order is c
 
 | Layer | What | Run |
 | --- | --- | --- |
-| Unit + integration | 176 tests: the claim against a real Postgres, including the two that matter — **never oversells** (20 000 attempts against 1 000 units yields exactly 1 000 orders to 1 000 buyers) and **never grants one buyer two units** (500 concurrent attempts by one buyer yield one order); queue wiring and redelivery against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
-| End to end | 16 Playwright specs against the built app | `pnpm test:e2e` |
+| Unit + integration | 178 tests: the claim against a real Postgres, including the two that matter — **never oversells** (20 000 attempts against 1 000 units yields exactly 1 000 orders to 1 000 buyers) and **never grants one buyer two units** (500 concurrent attempts by one buyer yield one order); queue wiring and redelivery against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
+| End to end | 19 Playwright specs against the built app | `pnpm test:e2e` |
 | Stress | k6 scenarios, then the invariants checked in Postgres | `pnpm stress <scenario>` |
 
 CI runs the first two on every pull request — the unit suite twice, once in a non-UTC timezone, since a suite that only passes in UTC cannot catch code that depends on the local zone.
@@ -192,6 +192,7 @@ Playwright drives real browsers against a stack it starts itself (the API servin
 | `time` | one instant shown in Tokyo and St John's, each labelled; a browser clock two hours fast leaves the countdown right |
 | `rejection` | not yet open, ended, already held, `503`, `429` — each ends in a message |
 | `double-click` | exactly one attempt sent |
+| `stuck` | a purchase never sits on *Securing* for good: a rejection that never arrives settles at sellout, Buy waits for the socket, a rename neither carries an attempt over nor loses it |
 
 ### Stress tests
 
