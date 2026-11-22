@@ -32,6 +32,7 @@ async function main(): Promise<void> {
   const channel = await connection.createConfirmChannel();
   const { queue, exchange } = await assertTopology(channel, {
     environment: config.APP_ENV,
+    ...(config.QUEUE_MAX_LENGTH ? { maxLength: config.QUEUE_MAX_LENGTH } : {}),
   });
 
   const app = await buildServer({

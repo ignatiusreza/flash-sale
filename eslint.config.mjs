@@ -68,5 +68,13 @@ export default tseslint.config(
     rules: { 'no-console': 'off' },
   },
 
+  // k6 scripts run in k6's own runtime, which provides these.
+  {
+    files: ['tests/stress/**/*.js'],
+    languageOptions: {
+      globals: { __ENV: 'readonly', __VU: 'readonly', __ITER: 'readonly' },
+    },
+  },
+
   prettier,
 );

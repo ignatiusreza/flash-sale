@@ -428,6 +428,12 @@ The layer earned its place on its first run, against code that had passed every 
 
 **Load shedding is a test case, not an afterthought.** Drive past the queue bound and assert the API returns `503` cleanly, memory stays flat, and no attempt is silently dropped.
 
+**As built (phase 7).** `pnpm stress sale|shedding|capacity`, k6 from Docker against its own `APP_ENV=stress` stack with two API instances — a buyer's socket on one, their `POST` on the other, so results cross the fanout. The invariants are checked in Postgres afterwards. Measured on one laptop running everything: end-to-end p99 34 ms; 10 000 attempts/s held for 20 s against 20 000 units, 11.7× oversubscribed, with exactly 20 000 orders to distinct buyers; at the bound, every overflow shed with `503` and every accepted attempt an order. The rush is held at the API — 208 000 of 233 000 attempts refused from cache after sellout — while the queue path alone sustains ~8 600/s here, degrading by shedding rather than by latency. The README has the table and the reading of it.
+
+Two thresholds were loosened after measuring, both stated where they are set: the queue bound is not exact with concurrent publishers (50 over 50 000), and a rush counts as held with under 1% of planned arrivals dropped by k6, since a shared laptop always drops a handful.
+
+The first run found a real defect: the worker drained at ~4 000 claims/s against ~35 000/s for the claim alone, because Nagle's algorithm held its ack behind its result publish for ~20 ms every batch. Every broker connection now goes through `connectBroker`, with `noDelay`.
+
 ## 12. Repo layout and tooling
 
 ```
@@ -575,7 +581,7 @@ Nothing here blocks a start; each has a stated default I will proceed under.
 
 1. **Is a `docker compose up` dependency acceptable to the reviewer**, or must everything run with `npm install && npm start` alone? *Default: compose, with in-memory adapters for the queue and store so unit tests run with no containers.*
 2. **How long is the exercise meant to take?** The phasing above is ~20 hours. *Default: build phases 0–6 and 8 to a high standard, then 7 as time allows.*
-3. **Should the stress test run in CI?** It needs sustained load and will be slow and noisy on shared runners. *Default: unit, integration, the two invariant tests and the Playwright suite all run in CI — the E2E layer is slow in wall-clock terms but not load-sensitive, so it is reliable on a shared runner in a way k6 is not. The full k6 run stays manual, with its results committed.*
+3. ~~**Should the stress test run in CI?**~~ **Decided in phase 7: no, manual, with results in the README.** It needs sustained load and will be slow and noisy on shared runners. *Default: unit, integration, the two invariant tests and the Playwright suite all run in CI — the E2E layer is slow in wall-clock terms but not load-sensitive, so it is reliable on a shared runner in a way k6 is not. The full k6 run stays manual, with its results committed.*
 4. **How large is the batch window?** 100 claims per transaction and a 5 ms flush are what §4.2 assumes and §4.3 measures, but the pair trades latency against throughput and the right values depend on burst shape. *Default: ship those, instrument batch-size distribution and flush-reason, and tune against the stress results rather than guessing up front.*
 5. ~~**Counter row, or a pool of claimable rows?**~~ **Decided 2026-11-20: counter row.** [`prototype/postgres-pool/`](./prototype/postgres-pool/) measures pre-warming stock as `user_id IS NULL` order rows claimed with `FOR UPDATE SKIP LOCKED`. It reaches 61k claims/s batched across 10 workers — ~1.5× this plan's design — and, because it removes the contended counter row, it also removes the main reason the queue exists. The deciding question is not throughput but whether a unit needs a lifecycle (§15.2). The brief has no payment step, so the counter stays and phase 1 builds §4.1 as written. **Revisit the moment payment enters scope**, because reservations need per-unit state and the batching advantage that favours the counter stops mattering once the PSP is the bottleneck.
 

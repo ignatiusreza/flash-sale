@@ -4,7 +4,7 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 6 of 8.** The system works end to end — claim, queue, API, realtime and frontend — and a Playwright suite proves it from the browser. Remaining: stress tests and the write-up. See `docs/PLAN.md` §13.
+> **Status: phase 7 of 8.** The system works end to end — claim, queue, API, realtime and frontend — a Playwright suite proves it from the browser, and k6 proves it under load: 10 000 attempts/s held, the stock sold exactly. Remaining: the write-up. See `docs/PLAN.md` §13.
 
 ## API
 
@@ -80,6 +80,7 @@ If one is not reachable, `pnpm dev` says which and stops, rather than hanging.
 | `pnpm dev` | `development` | `flashsale_development` | `development.purchase.attempts` / `development.flash-sale.events` |
 | `pnpm test` | `test` | `flashsale_test` | a queue per test, deleted after it |
 | `pnpm test:e2e` | `e2e` | `flashsale_e2e` | `e2e.purchase.attempts` / `e2e.flash-sale.events` |
+| `pnpm stress` | `stress` | `flashsale_stress` | `stress.purchase.attempts` / `stress.flash-sale.events` |
 | deployed | `production` (default) | whatever `DATABASE_URL` names | `purchase.attempts` / `flash-sale.events` |
 
 For the database, `DATABASE_URL` says where Postgres is and who connects; the environment picks the database name unless the URL names one itself, in which case it is used as it is. The dev, test and E2E runs apply that rule; a deployed API and worker take `DATABASE_URL` exactly as given.
@@ -196,6 +197,36 @@ Each spec seeds its own sale through `POST /api/test/sale`, which exists only wh
 | `rejection` | not yet open, ended, already held, `503` and `429` each end in a message — the last two substituted at the network, since producing a real `503` is the stress suite's job |
 | `double-click` | a double click sends exactly one attempt |
 
+### Stress tests
+
+```sh
+pnpm stress sale        # an oversubscribed sale: latency, the rush, the invariants
+pnpm stress shedding    # past the queue bound: clean 503s, nothing accepted lost
+pnpm stress capacity    # exploratory: the ceiling with every attempt queued
+```
+
+Each run builds the app and starts its own stack as `APP_ENV=stress` — so it runs beside `pnpm dev` and the E2E suite — with **two API instances**: a buyer's socket goes to one and their `POST` to the other, so every result crosses instances through the fanout. [k6](https://k6.io) drives the load from Docker (`grafana/k6:2.3.0`), standing in for many clients, each with its own address so the per-IP rate limit sees them as distinct. Afterwards the run checks the invariants **in Postgres**, because a load test that only reports throughput proves nothing. Stress is not in CI — it needs sustained load a shared runner cannot give reliably (`docs/PLAN.md` §16, question 3).
+
+k6 is AGPL-3.0. It runs as a separate program driving the API over HTTP and WebSockets, never linked into, bundled with or shipped alongside this code — the same position as Postgres and RabbitMQ under the licence rule in `CLAUDE.md`.
+
+**Results** — on one laptop (AMD Ryzen 5 7640U, 6 cores / 12 threads, 30 GB) running k6, both API instances, the worker, Postgres and RabbitMQ at once:
+
+| Scenario | Target (`docs/PLAN.md` §2.3) | Measured |
+| --- | --- | --- |
+| `sale` steady: buyers connected over the socket, timed from `POST` to result | p99 < 100 ms | p50 9 ms, p95 24 ms, **p99 34 ms** |
+| `sale` rush: opening-second stampede, HTTP | ≥ 10 000 attempts/s sustained | **10 000/s held for 20 s** — 227 318 of 227 500 planned sent, 0 failed; `POST` p99 21 ms |
+| `sale` invariants, 20 000 units, 11.7× oversubscribed | zero oversell, zero double grant | **20 000 orders to 20 000 distinct buyers, stock 0** — every confirmed result a committed order |
+| `shedding`: worker stopped, 5 000/s at a 2 000 bound | clean rejection, nothing unbounded | 47 918 shed with `503`, 0 failed; **all 2 005 accepted became orders**; API memory +41 MB |
+| `capacity`: 10 000/s held, stock that never sells out | — | ~8 600/s sustained through the queue; past that the queue reaches its bound and sheds cleanly |
+
+What the numbers mean:
+
+- **The rush is held at the API, not the queue.** Of 233 000 attempts, 208 000 were refused with `409` from the in-memory sale cache once stock was gone (`docs/PLAN.md` §6); only 25 000 — the 20 000 winners and those arriving within the cache's one-second refresh — ever reached the queue. That is the design working: doomed traffic is the cheapest to answer.
+- **The queue path's own ceiling is lower,** about 8 600 attempts/s when every attempt is a winner, on hardware shared with everything else. Past it the system degrades the way it should: the queue fills to its bound and the overflow gets a clean `503`, as `shedding` shows, rather than unbounded latency or lost purchases.
+- **The bound is not exact.** With two instances publishing at once, 2 005 attempts were accepted for a bound of 2 000 (50 over at 50 000). What matters — that the queue stops growing and every accepted attempt survives — holds.
+
+**What the first run found.** The worker drained at ~4 000 claims/s, against ~35 000/s for the claim alone. The time went to Nagle's algorithm: the worker writes a batch's results and then its ack in two small pieces, and with Nagle on (amqplib's default) the second waited ~20 ms on the broker's delayed acknowledgement of the first — every batch. Connecting with `noDelay` (`connectBroker` in `@flash-sale/messaging`) took the same drain to ~33 000 claims/s in isolation and ~18 000/s in the shared stack, and halved the API's `POST` latency, which waits on a broker confirm every time.
+
 ### Running the gates inside Docker
 
 The `runner` service builds the `test` stage of the `Dockerfile` and reaches the services **by name** over the compose network, so no host port is involved at all:
@@ -259,6 +290,7 @@ Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks
 | `pnpm typecheck`            | Build graph, test files, and the web app.                   |
 | `pnpm test`                 | Vitest, against local services by default (see above).      |
 | `pnpm test:e2e`             | Playwright against the built stack (see below).             |
+| `pnpm stress <scenario>`    | k6 load against a stack of its own, then the invariants (see below). |
 | `pnpm lint` / `pnpm format` | ESLint / Prettier.                                          |
 | `pnpm licenses:check`       | Fails on any dependency licence outside the allowlist.      |
 | `pnpm clean`                | Removes build output.                                       |
