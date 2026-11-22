@@ -71,14 +71,14 @@ jobs:
         run: pnpm test
         env:
           TZ: UTC
-          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432/flashsale
+          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432
           RABBITMQ_URL: amqp://flashsale:flashsale@localhost:5672
 
       - name: Test (non-UTC)
         run: pnpm test
         env:
           TZ: America/St_Johns
-          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432/flashsale
+          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432
           RABBITMQ_URL: amqp://flashsale:flashsale@localhost:5672
 
       - name: Licences
@@ -135,7 +135,7 @@ jobs:
         run: pnpm test:e2e
         env:
           TZ: UTC
-          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432/flashsale
+          DATABASE_URL: postgres://flashsale:flashsale@localhost:5432
           RABBITMQ_URL: amqp://flashsale:flashsale@localhost:5672
 
       - name: Keep the report

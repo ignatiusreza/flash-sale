@@ -66,7 +66,7 @@ It assumes each service's stock local credentials, and either can be overridden 
 
 | Variable | Default |
 | --- | --- |
-| `DATABASE_URL` | `postgres://postgres@localhost:5432/flashsale_development` — the `postgres` superuser, no password |
+| `DATABASE_URL` | `postgres://postgres@localhost:5432` — the `postgres` superuser, no password; with no database named, the environment picks it (`flashsale_development`) |
 | `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` — RabbitMQ's default user |
 
 If one is not reachable, `pnpm dev` says which and stops, rather than hanging.
@@ -82,6 +82,8 @@ If one is not reachable, `pnpm dev` says which and stops, rather than hanging.
 | `pnpm test:e2e` | `e2e` | `flashsale_e2e` | `e2e.purchase.attempts` / `e2e.flash-sale.events` |
 | deployed | `production` (default) | whatever `DATABASE_URL` names | `purchase.attempts` / `flash-sale.events` |
 
+For the database, `DATABASE_URL` says where Postgres is and who connects; the environment picks the database name unless the URL names one itself, in which case it is used as it is. The dev, test and E2E runs apply that rule; a deployed API and worker take `DATABASE_URL` exactly as given.
+
 It is not `NODE_ENV`, which says how code runs — build mode, React's dev checks. The two vary independently: E2E runs production code against test data. RabbitMQ virtual hosts would be the more literal split, but creating one needs broker admin rights, while queues and exchanges are declared on first use.
 
 ### Using the Compose services instead
@@ -91,11 +93,13 @@ Without local services, Compose provides both — on non-default ports, so they 
 ```sh
 docker compose up -d --wait
 cat >> .env <<'EOF'
-DATABASE_URL=postgres://flashsale:flashsale@localhost:15432/flashsale
+DATABASE_URL=postgres://flashsale:flashsale@localhost:15432
 RABBITMQ_URL=amqp://flashsale:flashsale@localhost:15673
 EOF
 pnpm dev
 ```
+
+Leave the database name off the URL: each environment then picks its own (`flashsale_development` for `pnpm dev`, `flashsale_test` for `pnpm test`), so they never share one. A URL that does name a database is used as it is.
 
 To see the whole thing running, built and containerised, with nothing on the host but Docker:
 

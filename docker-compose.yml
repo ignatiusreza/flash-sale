@@ -68,7 +68,8 @@ services:
       target: test
     environment:
       TZ: UTC
-      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432/flashsale
+      # No database name, so the tests use their own, flashsale_test.
+      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432
       RABBITMQ_URL: amqp://flashsale:flashsale@rabbitmq:5672
     depends_on:
       postgres:

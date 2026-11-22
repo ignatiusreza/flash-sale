@@ -9,6 +9,8 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { databaseUrlFor } from './database-url.mjs';
+
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 const COLORS = { types: 36, api: 32, worker: 35, web: 33, dev: 34, e2e: 34 };
@@ -74,9 +76,9 @@ export function supervisor(name) {
    *
    * DATABASE_URL and RABBITMQ_URL come from the shell first, then `.env` unless
    * `readEnvFile` is false, then default to the local services with their stock
-   * credentials — Postgres's passwordless `postgres`, RabbitMQ's `guest` — and
-   * a database named for the environment. Exits, naming the service, if either
-   * cannot be reached.
+   * credentials — Postgres's passwordless `postgres`, RabbitMQ's `guest`. A
+   * DATABASE_URL naming no database gets one named for the environment
+   * (`databaseUrlFor`). Exits, naming the service, if either cannot be reached.
    */
   async function resolveServices(appEnv, { readEnvFile = true } = {}) {
     const envFile = path.join(ROOT, '.env');
@@ -84,8 +86,10 @@ export function supervisor(name) {
 
     const env = {
       APP_ENV: appEnv,
-      DATABASE_URL:
-        process.env.DATABASE_URL || `postgres://postgres@localhost:5432/flashsale_${appEnv}`,
+      DATABASE_URL: databaseUrlFor(
+        process.env.DATABASE_URL || 'postgres://postgres@localhost:5432',
+        appEnv,
+      ),
       RABBITMQ_URL: process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
     };
 

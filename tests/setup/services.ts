@@ -3,15 +3,17 @@ import net from 'node:net';
 import path from 'node:path';
 
 import { ensureDatabase } from '../../apps/worker/src/db/ensure-database.js';
+import { databaseUrlFor } from '../../scripts/lib/database-url.mjs';
 
 /**
  * Points the integration tests at Postgres and RabbitMQ, with the same local
  * defaults as `pnpm dev`, so `pnpm test` on a machine running both needs no
  * setup.
  *
- * It is `APP_ENV=test`: the database is `flashsale_test` rather than the dev
- * one, so a test run never writes into data you are clicking through, and it
- * is created if missing. The queue tests already use a queue per test.
+ * It is `APP_ENV=test`: unless DATABASE_URL names a database, the database is
+ * `flashsale_test` rather than the dev one, so a test run never writes into
+ * data you are clicking through, and it is created if missing. The queue tests
+ * already use a queue per test.
  *
  * A URL set explicitly — shell, `.env`, CI, the compose runner — is used as
  * given and must be reachable. A default that is not reachable is dropped
@@ -21,7 +23,7 @@ import { ensureDatabase } from '../../apps/worker/src/db/ensure-database.js';
 const APP_ENV = 'test';
 
 const DEFAULTS = {
-  DATABASE_URL: `postgres://postgres@localhost:5432/flashsale_${APP_ENV}`,
+  DATABASE_URL: 'postgres://postgres@localhost:5432',
   RABBITMQ_URL: 'amqp://guest:guest@localhost:5672',
 } as const;
 
@@ -40,7 +42,11 @@ export default async function setup(): Promise<void> {
     }
   }
 
-  if (process.env.DATABASE_URL) await ensureDatabase(process.env.DATABASE_URL);
+  if (process.env.DATABASE_URL) {
+    // Explicit or default, a URL naming no database gets `flashsale_test`.
+    process.env.DATABASE_URL = databaseUrlFor(process.env.DATABASE_URL, APP_ENV);
+    await ensureDatabase(process.env.DATABASE_URL);
+  }
 }
 
 function reachable(host: string, port: number): Promise<boolean> {

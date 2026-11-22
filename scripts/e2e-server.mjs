@@ -16,9 +16,10 @@ import { supervisor } from './lib/stack.mjs';
 const e2e = supervisor('e2e');
 const PORT = Number(process.env.PORT || 3100);
 
-// Not `.env`: that is development configuration. A DATABASE_URL there names
-// the development database, and the reset endpoint would wipe its orders.
-// Service locations come from the shell (as CI provides them) or the defaults.
+// Not `.env`: that is development configuration. A DATABASE_URL there that
+// names a database is taken as it is — often the development one — and the
+// reset endpoint would wipe its orders. Service locations come from the shell
+// (as CI provides them) or the defaults.
 const env = await e2e.resolveServices('e2e', { readEnvFile: false });
 await e2e.checkPorts(
   [['E2E API', PORT]],

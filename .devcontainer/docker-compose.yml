@@ -34,7 +34,9 @@ services:
       # Matches the services and production (docs/PLAN.md §9.1). CI is what
       # covers the non-UTC case, by running the suite twice.
       TZ: UTC
-      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432/flashsale
+      # No database name: each environment picks its own (flashsale_development
+      # for pnpm dev, flashsale_test for pnpm test) — see APP_ENV in the README.
+      DATABASE_URL: postgres://flashsale:flashsale@postgres:5432
       RABBITMQ_URL: amqp://flashsale:flashsale@rabbitmq:5672
     depends_on:
       postgres:
