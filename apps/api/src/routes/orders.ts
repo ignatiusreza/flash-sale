@@ -9,6 +9,18 @@ import { errorResponse } from '../http/openapi.js';
 import { findOrder } from '../orders/queries.js';
 import { rateLimit } from '../http/rate-limit.js';
 
+/**
+ * A buyer's name: printable, so nothing reaches the claim that Postgres cannot
+ * store. A NUL byte made the whole claim statement fail — every honest buyer
+ * batched with it too — and was retried for good (issue #17).
+ */
+const USER_ID = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 128,
+  pattern: '^[^\\u0000-\\u001F\\u007F]+$',
+} as const;
+
 /** The filtered index a user's order will appear in. */
 const ordersOf = (userId: string) => `/api/orders?userId=${encodeURIComponent(userId)}`;
 
@@ -27,7 +39,7 @@ const createSchema = {
     // off ajv's `removeAdditional` — that cannot be set per route.
     additionalProperties: false,
     properties: {
-      userId: { type: 'string', minLength: 1, maxLength: 128 },
+      userId: USER_ID,
     },
   },
   response: {
@@ -61,7 +73,7 @@ const indexSchema = {
     type: 'object',
     required: ['userId'],
     additionalProperties: false,
-    properties: { userId: { type: 'string', minLength: 1, maxLength: 128 } },
+    properties: { userId: USER_ID },
   },
   response: {
     200: {

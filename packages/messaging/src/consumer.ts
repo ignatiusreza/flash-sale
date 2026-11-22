@@ -14,6 +14,13 @@ export interface BatchConsumerOptions {
   /** Backoff between retries of a failing batch, doubling up to the cap. */
   readonly retryMinMs?: number;
   readonly retryMaxMs?: number;
+  /**
+   * Whether a failure belongs to the batch rather than to the moment — bad
+   * data, not an outage. Such a batch is never retried as it is: it is split
+   * until the attempt responsible is alone, and that one is dead-lettered.
+   * Everything else is retried in place. Defaults to nothing being permanent.
+   */
+  readonly isPermanent?: (error: unknown) => boolean;
 }
 
 export interface BatchConsumer {
@@ -44,6 +51,7 @@ export async function startBatchConsumer(options: BatchConsumerOptions): Promise
   const onError = options.onError ?? (() => {});
   const retryMinMs = options.retryMinMs ?? 100;
   const retryMaxMs = options.retryMaxMs ?? 10_000;
+  const isPermanent = options.isPermanent ?? (() => false);
 
   // Prefetch must exceed the batch size: at exactly batchMax the broker stops
   // sending the moment a batch is assembled, and the consumer idles through the
@@ -103,33 +111,64 @@ export async function startBatchConsumer(options: BatchConsumerOptions): Promise
     }
     if (attempts.length === 0) return;
 
-    // A failing batch is retried here, held unacked, never handed back: a
-    // requeue counts as a delivery, and the queue drops a message past its
-    // delivery limit — a database outage would cycle every accepted attempt
-    // into nothing within seconds. Held, the batch fills the prefetch, the
-    // broker stops delivering, the queue fills to its bound and the API sheds
-    // with 503. If the process dies instead, the broker redelivers it.
+    await settle(parsed, attempts);
+  }
+
+  /**
+   * Handles one run of attempts and settles every one of its messages.
+   * Resolves false if stopped before it could, having handed them back.
+   *
+   * A failure that will pass is retried here, held unacked, never handed back:
+   * a requeue counts as a delivery, and the queue drops a message past its
+   * delivery limit — a database outage would cycle every accepted attempt into
+   * nothing within seconds. Held, the batch fills the prefetch, the broker
+   * stops delivering, the queue fills to its bound and the API sheds with 503.
+   * If the process dies instead, the broker redelivers it.
+   *
+   * A failure that will not pass must not be held, or one bad attempt stops
+   * every purchase behind it for good (issue #17). The run is halved until the
+   * attempt responsible is alone, and only that one is dead-lettered; the
+   * others are claimed as usual.
+   */
+  async function settle(messages: ConsumeMessage[], attempts: PurchaseAttempt[]): Promise<boolean> {
     for (let delay = retryMinMs; ; delay = Math.min(delay * 2, retryMaxMs)) {
       try {
         await handle(attempts);
         break;
       } catch (error) {
         onError(error);
+        if (isPermanent(error)) {
+          if (messages.length === 1) {
+            channel.reject(messages[0]!, false);
+            return true;
+          }
+          const half = Math.ceil(messages.length / 2);
+          if (!(await settle(messages.slice(0, half), attempts.slice(0, half)))) {
+            // Stopped in the first half: the second must go back as well, or
+            // a later ack would swallow it.
+            for (const message of messages.slice(half)) channel.nack(message, false, true);
+            return false;
+          }
+          return settle(messages.slice(half), attempts.slice(half));
+        }
         if (!stopped) await pause(delay);
         if (stopped) {
           // Stopping mid-outage: hand the batch back, to the front of the
           // queue, for the next consumer. Left unacked, a later batch's ack —
           // which covers every delivery up to its own — would swallow it.
-          for (const message of parsed) channel.nack(message, false, true);
-          return;
+          for (const message of messages) channel.nack(message, false, true);
+          return false;
         }
       }
     }
 
     // Only now. Commit-then-die is safe: the batch is redelivered and the claim
-    // makes the replay a no-op. Ack-then-commit would lose purchases.
-    const last = parsed[parsed.length - 1];
+    // makes the replay a no-op. Ack-then-commit would lose purchases. Every
+    // earlier delivery is settled by now, halves included, so one ack covers
+    // this run without reaching past it.
+    const last = messages[messages.length - 1];
     if (last) channel.ack(last, true);
+    return true;
   }
 
   const { consumerTag } = await channel.consume(

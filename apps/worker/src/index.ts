@@ -8,6 +8,7 @@ import {
 } from '@flash-sale/messaging';
 
 import { createPool } from './db/pool.js';
+import { isBadAttemptData } from './claim/failures.js';
 import { handleBatch } from './claim/handler.js';
 import { migrate } from './db/migrate.js';
 
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
     channel,
     queue,
     ...(batchMax ? { batchMax } : {}),
+    isPermanent: isBadAttemptData,
     handle: async (attempts) => {
       const message = await handleBatch(pool, saleId, attempts);
       // After the commit, never before: see startBatchConsumer.

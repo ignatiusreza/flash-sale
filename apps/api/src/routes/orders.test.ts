@@ -11,6 +11,43 @@ afterEach(async () => {
   await app?.close();
 });
 
+describe('the user id', () => {
+  // A NUL byte cannot be stored by Postgres: it failed the whole claim, and
+  // with it every honest buyer in the same batch (issue #17).
+  it('is refused with a control character, before anything is queued or queried', async () => {
+    const query = vi.fn();
+    const { app: server, published } = await createTestServer({
+      pool: { query } as unknown as pg.Pool,
+    });
+    app = server;
+
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/orders',
+      payload: { userId: 'mallory\u0000x' },
+    });
+    const lookup = await app.inject({ method: 'GET', url: '/api/orders?userId=mallory%00x' });
+
+    expect(create.statusCode).toBe(400);
+    expect(lookup.statusCode).toBe(400);
+    expect(published).toEqual([]);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('may be any printable text, not just ASCII', async () => {
+    const { app: server } = await createTestServer();
+    app = server;
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/orders',
+      payload: { userId: 'Zoë 🎉 東京' },
+    });
+
+    expect(response.statusCode).toBe(202);
+  });
+});
+
 describe('POST /api/orders', () => {
   it('queues an attempt and answers 202 once the broker confirms', async () => {
     const { app: server, published } = await createTestServer();
