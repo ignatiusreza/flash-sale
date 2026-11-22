@@ -29,13 +29,22 @@ export interface ClaimResult {
  *    silently destroys stock on every redelivery — and RabbitMQ delivery is
  *    at-least-once, so that is not hypothetical.
  *
- * 2. **`ord <= remaining` preserves arrival order.** When a batch straddles
+ * 2. **Places go to buyers who can win, in arrival order.** Each buyer is
+ *    ranked once, at their first entry, and only if they hold no order yet:
+ *    otherwise a holder or a repeat takes a place but no stock, and a buyer
+ *    behind them is told sold out while units remain. The holder check is one
+ *    unique-index probe per buyer: `LIMIT 1` keeps the planner from turning it
+ *    into an anti-join over every order in the sale, which it does on
+ *    statistics taken before the sale filled. When a batch straddles
  *    sellout the earliest arrivals win, which is where the brief's fairness
  *    requirement actually lives.
  *
  * 3. **`FOR UPDATE` is defence in depth.** With one active consumer there is
  *    no concurrency to guard against, but the statement stays correct if a
- *    second worker is ever running — during a botched failover, say.
+ *    second worker is ever running — during a botched failover, say. The
+ *    final UPDATE joins `locked` so the lock is always taken first: read only
+ *    from RETURNING, it ran after the row was updated, and found nothing,
+ *    whenever no buyer in the batch was eligible.
  *
  * The window is checked here as well as at the API edge: this is the durable
  * enforcer, and the API's copy is only an optimisation (docs/PLAN.md §6).
@@ -50,10 +59,18 @@ locked AS (
   FROM sales WHERE id = $1
   FOR UPDATE
 ),
+eligible AS (
+  SELECT f.user_id, row_number() OVER (ORDER BY f.first_ord) AS place
+  FROM (SELECT user_id, min(ord) AS first_ord FROM input GROUP BY user_id) f
+  LEFT JOIN LATERAL (
+    SELECT 1 AS held FROM orders WHERE sale_id = $1 AND user_id = f.user_id LIMIT 1
+  ) o ON true
+  WHERE o.held IS NULL
+),
 candidate AS (
-  SELECT i.user_id
-  FROM input i, locked l
-  WHERE l.open AND i.ord <= l.remaining
+  SELECT e.user_id
+  FROM eligible e, locked l
+  WHERE l.open AND e.place <= l.remaining
 ),
 ins AS (
   INSERT INTO orders (sale_id, user_id)
@@ -61,14 +78,15 @@ ins AS (
   ON CONFLICT (sale_id, user_id) DO NOTHING
   RETURNING id, user_id
 )
-UPDATE sales
-SET remaining = remaining - (SELECT count(*) FROM ins)
-WHERE id = $1
+UPDATE sales s
+SET remaining = s.remaining - (SELECT count(*) FROM ins)
+FROM locked l
+WHERE s.id = $1
 RETURNING
-  remaining,
-  (SELECT open FROM locked) AS open,
-  (SELECT start_at FROM locked) AS start_at,
-  (SELECT end_at FROM locked) AS end_at,
+  s.remaining,
+  l.open,
+  l.start_at,
+  l.end_at,
   COALESCE(
     (SELECT json_agg(json_build_object('orderId', id, 'userId', user_id)) FROM ins),
     '[]'::json

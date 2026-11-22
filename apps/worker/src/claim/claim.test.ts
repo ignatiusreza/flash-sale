@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
+import type { PurchaseResultsMessage } from '@flash-sale/messaging';
 import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { claimBatch, claimOne } from './claim.js';
+import { handleBatch } from './handler.js';
 import { createPool } from '../db/pool.js';
 import { migrate } from '../db/migrate.js';
 
@@ -96,6 +98,25 @@ describeDb('claim', () => {
     expect(result.remaining).toBe(9);
   });
 
+  it('ranks only buyers who can win: a current holder takes no place', async () => {
+    await seed({ stock: 3 });
+    await claimOne(pool, SALE, 'alice');
+
+    const result = await claimBatch(pool, SALE, ['alice', 'bob', 'carol']);
+
+    expect(result.granted.map((g) => g.userId)).toEqual(['bob', 'carol']);
+    expect(result.remaining).toBe(0);
+  });
+
+  it('ranks only buyers who can win: a repeat entry takes no place', async () => {
+    await seed({ stock: 2 });
+
+    const result = await claimBatch(pool, SALE, ['dave', 'dave', 'erin']);
+
+    expect(result.granted.map((g) => g.userId)).toEqual(['dave', 'erin']);
+    expect(result.remaining).toBe(0);
+  });
+
   it('is idempotent when a committed batch is redelivered', async () => {
     const users = ['a', 'b', 'c'];
     const first = await claimBatch(pool, SALE, users);
@@ -137,6 +158,71 @@ describeDb('claim', () => {
     expect(result.open).toBe(true);
     expect(result.granted).toEqual([]);
     expect(result.remaining).toBe(0);
+  });
+
+  describe('what each buyer is told', () => {
+    const attempt = (userId: string) => ({
+      attemptId: randomUUID(),
+      saleId: SALE,
+      userId,
+      requestedAt: new Date().toISOString(),
+    });
+    const outcomes = (message: PurchaseResultsMessage) =>
+      message.results.map((r) => [r.userId, r.status]);
+
+    it('never says sold_out while the batch leaves stock behind', async () => {
+      await seed({ stock: 3 });
+      await claimOne(pool, SALE, 'alice');
+
+      const message = await handleBatch(
+        pool,
+        SALE,
+        ['alice', 'bob', 'bob', 'carol', 'dave'].map(attempt),
+      );
+
+      expect(outcomes(message)).toEqual([
+        ['alice', 'already_purchased'],
+        ['bob', 'confirmed'],
+        ['bob', 'confirmed'],
+        ['carol', 'confirmed'],
+        ['dave', 'sold_out'],
+      ]);
+      expect((await counts()).remaining).toBe(0);
+    });
+
+    it('still sells to the rest when an order is committed while it waits on the lock', async () => {
+      // A second worker, as during a botched failover. The claim reads existing
+      // orders from a snapshot taken before the lock is granted, so the racer
+      // looks eligible, takes a place, then conflicts: the unit it was ranked
+      // for is still there, and someone else must get it.
+      await seed({ stock: 2 });
+      const holder = await pool.connect();
+      try {
+        await holder.query('BEGIN');
+        await claimOne(holder, SALE, 'racer');
+        const { rows } = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+
+        const waiting = handleBatch(pool, SALE, ['racer', 'other'].map(attempt));
+        await expect
+          .poll(async () => {
+            const blocked = await pool.query(
+              'SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))',
+              [rows[0]!.pid],
+            );
+            return blocked.rowCount;
+          })
+          .toBe(1);
+        await holder.query('COMMIT');
+
+        expect(outcomes(await waiting)).toEqual([
+          ['racer', 'already_purchased'],
+          ['other', 'confirmed'],
+        ]);
+        expect((await counts()).remaining).toBe(0);
+      } finally {
+        holder.release();
+      }
+    });
   });
 
   describe('the invariants', () => {
