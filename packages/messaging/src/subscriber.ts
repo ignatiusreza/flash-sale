@@ -18,7 +18,7 @@ export interface Subscription {
  * The queue is exclusive and auto-delete on purpose: it belongs to one API
  * instance and should vanish with it. Nothing here is worth keeping across a
  * restart — a missed result is recovered by the client re-syncing through
- * `GET /api/purchase/:userId`, which is what makes a dropped socket cosmetic
+ * `GET /api/orders?userId=`, which is what makes a dropped socket cosmetic
  * (docs/PLAN.md §5).
  *
  * Messages are *not* acknowledged individually (`noAck`): redelivering a

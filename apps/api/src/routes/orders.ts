@@ -9,12 +9,16 @@ import { errorResponse } from '../http/openapi.js';
 import { findOrder } from '../orders/queries.js';
 import { rateLimit } from '../http/rate-limit.js';
 
-const purchaseSchema = {
-  tags: ['purchase'],
-  summary: 'Attempt a purchase',
+/** The filtered index a user's order will appear in. */
+const ordersOf = (userId: string) => `/api/orders?userId=${encodeURIComponent(userId)}`;
+
+const createSchema = {
+  tags: ['orders'],
+  summary: 'Create an order',
   description:
-    'Returns 202 once the broker has confirmed the attempt is queued — not when it succeeds. ' +
-    'The outcome arrives over the WebSocket, or can be read from `GET /api/purchase/{userId}`. ' +
+    'This is how a user purchases. The order is accepted, not yet created: 202 once the broker has ' +
+    'confirmed the attempt is queued — not when it succeeds — with `Location` naming where the ' +
+    'order will appear. The outcome arrives over the WebSocket, or from `GET /api/orders?userId=`. ' +
     'A 409 means the attempt was rejected before reaching the queue; a 503 means the queue is saturated.',
   body: {
     type: 'object',
@@ -45,30 +49,41 @@ const purchaseSchema = {
   },
 } as const;
 
-const purchaseStatusSchema = {
-  tags: ['purchase'],
-  summary: "Look up a user's order",
+const indexSchema = {
+  tags: ['orders'],
+  summary: "List a user's orders",
   description:
-    'The reconnect source of truth. A dropped WebSocket is only cosmetic because this exists: ' +
-    'the client re-syncs here and lands on the correct terminal state regardless of what it missed.',
-  params: {
+    'Filtered by user, and the filter is required: unfiltered, this would list every buyer to ' +
+    'anyone while there is no authentication. One user holds at most one order, so the list has ' +
+    'zero or one entries. This is the reconnect source of truth — a dropped WebSocket is only ' +
+    'cosmetic because the client re-syncs here.',
+  querystring: {
     type: 'object',
     required: ['userId'],
+    additionalProperties: false,
     properties: { userId: { type: 'string', minLength: 1, maxLength: 128 } },
   },
   response: {
     200: {
-      type: 'object',
-      properties: {
-        status: { type: 'string', enum: ['none', 'confirmed'] },
-        orderId: { type: 'string', format: 'uuid' },
-        purchasedAt: { type: 'string', format: 'date-time' },
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          orderId: { type: 'string', format: 'uuid' },
+          purchasedAt: { type: 'string', format: 'date-time' },
+        },
       },
     },
   },
 } as const;
 
-export const purchaseRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) => {
+/**
+ * Orders as a REST resource: `index` (filtered by user) and `create`. `new`
+ * and `edit` are server-rendered forms an SPA does not need; an order cannot
+ * be changed or cancelled once claimed, so there is no `update` or `destroy`;
+ * and nothing needs `show` yet — it would be `GET /api/orders/:orderId`.
+ */
+export const orderRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) => {
   // IP first, then the user: the hook stops at the first exceeded limit, so an
   // IP-level flood does not also burn the quota of whichever identifier it
   // happens to be carrying.
@@ -81,20 +96,18 @@ export const purchaseRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) 
     },
   ]);
 
-  app.get<{ Params: { userId: string } }>(
-    '/api/purchase/:userId',
-    { schema: purchaseStatusSchema },
-    async (request, reply) => {
-      const { userId } = request.params;
-      const order = await findOrder(deps.pool, deps.saleId, userId);
-      if (!order) return reply.send({ status: 'none' });
-      return reply.send({ status: 'confirmed', ...order });
+  app.get<{ Querystring: { userId: string } }>(
+    '/api/orders',
+    { schema: indexSchema },
+    async (request) => {
+      const order = await findOrder(deps.pool, deps.saleId, request.query.userId);
+      return order ? [order] : [];
     },
   );
 
   app.post<{ Body: { userId: string } }>(
-    '/api/purchase',
-    { schema: purchaseSchema, preHandler: limited },
+    '/api/orders',
+    { schema: createSchema, preHandler: limited },
     async (request, reply) => {
       const { userId } = request.body;
 
@@ -123,7 +136,10 @@ export const purchaseRoutes: FastifyPluginAsync<ServerDeps> = async (app, deps) 
       // 202, not 200: the outcome arrives over the socket. Returning only once
       // the broker has confirmed is what makes that promise keepable — an
       // unconfirmed publish could vanish and the user would wait forever.
-      return reply.code(202).send({ status: 'queued', attemptId });
+      return reply
+        .code(202)
+        .header('location', ordersOf(userId))
+        .send({ status: 'queued', attemptId });
     },
   );
 };

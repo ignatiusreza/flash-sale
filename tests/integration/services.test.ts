@@ -3,13 +3,13 @@ import net from 'node:net';
 import { describe, expect, it } from 'vitest';
 
 /**
- * Proves the containerised runner reaches Postgres and RabbitMQ by *service
- * name* over the compose network, with no host port involved — which is the
- * whole point of running the suite inside Docker.
+ * Proves the suite reaches the Postgres and RabbitMQ it was pointed at —
+ * local defaults, `.env`, CI service containers, or the compose runner by
+ * service name. Which ports those are belongs to the environment, so only
+ * reachability is asserted.
  *
- * Skipped when the URLs are absent, so `pnpm test` on a bare checkout stays
- * green. Phase 1 replaces this with driver-level checks once there is a schema
- * and a queue worth talking to; for now it only asserts reachability.
+ * Skipped when no URL resolved (see tests/setup/services.ts), so `pnpm test` on
+ * a checkout with no services still runs the unit tests.
  */
 const DATABASE_URL = process.env.DATABASE_URL;
 const RABBITMQ_URL = process.env.RABBITMQ_URL;
@@ -40,14 +40,5 @@ describe.skipIf(!DATABASE_URL || !RABBITMQ_URL)('services', () => {
 
   it('reaches RabbitMQ at the configured URL', async () => {
     expect(await canConnect(hostPortOf(RABBITMQ_URL!))).toBe(true);
-  });
-
-  it('addresses both on their native ports', () => {
-    // Holds in the compose runner, where `postgres:5432` is the real port, and
-    // in CI, where the service containers are mapped 1:1 deliberately. The host
-    // itself is not asserted: it is a service name in one and localhost in the
-    // other, and which it is belongs to the environment, not to the test.
-    expect(hostPortOf(DATABASE_URL!).port).toBe(5432);
-    expect(hostPortOf(RABBITMQ_URL!).port).toBe(5672);
   });
 });

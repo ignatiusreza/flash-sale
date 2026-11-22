@@ -32,7 +32,7 @@ Invariants 2 and 3 get **two independent enforcers**: the worker's in-memory sta
 The brief leaves these open. Each is a defensible judgement call; the README will state the choice and the reason.
 
 - **Is there authentication?** No. `userId` is a client-supplied string, exactly as the brief's frontend description implies ("enter a user identifier"). The one-per-user rule is therefore enforced *per identifier*, not per human. I will say so explicitly rather than pretend otherwise, and note that in production this key would come from a verified session.
-- **Is the purchase synchronous?** No — and this is the central decision. `POST /api/purchase` returns `202 Accepted` once the attempt is durably queued; the outcome arrives over a WebSocket. The brief sanctions this directly by asking for a separate "check if you secured an item" endpoint, which doubles as the reconnect path. §3 explains why the asynchrony buys more than it costs — and §15.2 is the stronger reason: the moment a payment step exists, a synchronous response is impossible anyway, because no HTTP request should be held open across a PSP round trip. Choosing async now is what keeps that door open.
+- **Is the purchase synchronous?** No — and this is the central decision. `POST /api/orders` returns `202 Accepted` once the attempt is durably queued; the outcome arrives over a WebSocket. The brief sanctions this directly by asking for a separate "check if you secured an item" endpoint, which doubles as the reconnect path. §3 explains why the asynchrony buys more than it costs — and §15.2 is the stronger reason: the moment a payment step exists, a synchronous response is impossible anyway, because no HTTP request should be held open across a PSP round trip. Choosing async now is what keeps that door open.
 - **Is "already purchased" an error?** No — it is a success. Because each user may hold at most one item, `userId` is a natural idempotency key: a retried attempt resolves to the *same* order. This matters because the first thing a panicking user does is double-click.
 - **Is stock exposed?** Exact remaining stock is a poll magnet and leaks sale mechanics. The status endpoint returns a coarse `availability: "plenty" | "low" | "sold_out"`, not a live counter.
 - **Reservation or sale?** A claim is final, not a held reservation. There is no payment step in the brief, so a TTL'd reservation that can expire adds a class of states ("expired, stock returned") the requirement never asks for. Out of scope — but it is the first thing that changes if payment arrives, and §15.2 works through what it would cost.
@@ -50,7 +50,7 @@ Concrete numbers, so the stress test has something to pass or fail:
 
 ```mermaid
 flowchart TB
-    U[Browser - React + Socket.IO] -->|POST /api/purchase| A1
+    U[Browser - React + Socket.IO] -->|POST /api/orders| A1
     U <-->|WebSocket| A1
 
     subgraph API [API tier - horizontally scalable]
@@ -230,7 +230,7 @@ Four conclusions drive the rest of the design:
 
 | Failure | Behaviour | Severity |
 |---|---|---|
-| API instance dies | Sockets drop. Client reconnects to another instance and re-syncs via `GET /api/purchase/:userId`. An already-queued attempt still gets processed; the result is waiting. | None |
+| API instance dies | Sockets drop. Client reconnects to another instance and re-syncs via `GET /api/orders?userId=`. An already-queued attempt still gets processed; the result is waiting. | None |
 | Worker dies mid-batch | Uncommitted transaction rolls back; messages were never acked, so RabbitMQ redelivers them to the newly promoted consumer. | None |
 | Worker dies after commit, before ack | Redelivery re-runs the claim; `ON CONFLICT DO NOTHING` makes it a no-op and the result is re-published. Idempotent. | None |
 | Postgres down | Worker stops acking; the queue backs up to its bound, then the API sheds load with `503`. No incorrect answers are given. | Degraded, self-healing |
@@ -254,7 +254,7 @@ Two things this changes beyond uptime:
 - **Publisher confirms get stronger.** On a single node a confirm means "on one broker's disk". On a quorum queue it means "on a majority of replicas", so the confirm the API waits for before returning `202` now genuinely survives a node loss. The two mechanisms reinforce each other; neither is sufficient alone.
 - **`x-single-active-consumer` still applies**, so the serialization the whole design rests on is unaffected by replication.
 
-Not every queue should be quorum. The per-instance queues bound to the results fanout (§8) are exclusive and auto-delete — they are meant to die with their API instance, and losing one costs nothing because the client re-syncs via `GET /api/purchase/:userId`. Replicating them would pay a consensus cost for data with no value past the second it was produced.
+Not every queue should be quorum. The per-instance queues bound to the results fanout (§8) are exclusive and auto-delete — they are meant to die with their API instance, and losing one costs nothing because the client re-syncs via `GET /api/orders?userId=`. Replicating them would pay a consensus cost for data with no value past the second it was produced.
 
 **What this does not fix**, and the README should say so rather than imply a cluster is a cure:
 
@@ -287,9 +287,11 @@ The limiter is `@fastify/rate-limit`, whose default store is **in process, not s
 | Method | Path | Returns |
 |---|---|---|
 | `GET` | `/api/sale` | `{ status, availability, startAt, endAt, serverTime, viewers }` |
-| `POST` | `/api/purchase` | `202 { status: "queued", attemptId }` · `409 { status: sold_out\|not_started\|ended }` · `429` · `503` |
-| `GET` | `/api/purchase/:userId` | `{ status: none\|confirmed, orderId?, purchasedAt? }` — reconnect source of truth |
+| `POST` | `/api/orders` | create: `202 { status: "queued", attemptId }` + `Location: /api/orders?userId=` · `409 { status: sold_out\|not_started\|ended }` · `429` · `503` |
+| `GET` | `/api/orders?userId=` | index, filtered: `200 [{ orderId, purchasedAt }]` — zero or one entries · `400` without the filter — reconnect source of truth |
 | `GET` | `/healthz` `/readyz` `/metrics` | liveness, readiness, Prometheus |
+
+Orders are a REST resource with `index` and `create`. `new`/`edit` are server-rendered forms an SPA does not need; an order is immutable once claimed, so no `update`/`destroy` (cancellation arrives with payment, §15.2). A reconnecting client knows its user but not its order id, so it asks for the user's orders — a filtered `index`, not a `show` keyed by something other than the order's id. The filter is required: unfiltered, `index` would expose every buyer while there is no authentication. Nothing needs `show` yet; it would be `GET /api/orders/:orderId`. `create` answers `202 Accepted` rather than `201 Created` because the order is decided asynchronously, and its `Location` is the filtered index the order will appear in.
 
 WebSocket events pushed to the client:
 
@@ -369,7 +371,7 @@ Deliberately small — the brief asks for a demonstration, not a storefront. Vit
 - An explicit **queued** state between `202` and the WebSocket result — this is the honest representation of what the system is doing, and it is where a real flash sale shows a spinner.
 - Terminal states: *confirmed* (with order id), *already purchased*, *sold out*, *not started*, *ended*, *try again* (on `503`).
 - Live viewer count from `sale:viewers`.
-- On mount and on every reconnect, it calls `GET /api/purchase/:userId`, so a dropped socket never loses a result.
+- On mount and on every reconnect, it calls `GET /api/orders?userId=`, so a dropped socket never loses a result.
 
 ## 11. Testing strategy
 
@@ -393,7 +395,7 @@ What belongs here, in rough order of value:
 | Spec | What it proves |
 |---|---|
 | `purchase` | The async flow end to end: click → `202` → **queued** state visible → `purchase:result` arrives → confirmed with an order id. The intermediate state is the point; it is the one thing a synchronous design would not have. |
-| `reconnect` | **The critical resilience path.** Drop the socket mid-purchase with `context.setOffline(true)`, restore it, and assert the client re-syncs through `GET /api/purchase/:userId` and lands on the correct terminal state. §5 claims a dropped socket is cosmetic — this is what makes that a verified claim rather than an assertion. |
+| `reconnect` | **The critical resilience path.** Drop the socket mid-purchase with `context.setOffline(true)`, restore it, and assert the client re-syncs through `GET /api/orders?userId=` and lands on the correct terminal state. §5 claims a dropped socket is cosmetic — this is what makes that a verified claim rather than an assertion. |
 | `concurrency` | Several browser contexts race for the last units. One wins, the others see *sold out*. Tests the UI's handling of losing, not the invariant. |
 | `presence` | Open three contexts, assert the viewer count converges to three; close one, assert it falls. The §8 fanout aggregation has no other honest test. |
 | `lifecycle` | *upcoming → active → ended* observed live, without a reload. |
@@ -433,20 +435,44 @@ docker-compose.yml   README.md
 
 pnpm workspaces. Fastify over Express for throughput and schema-based validation; `socket.io`; `amqplib` for RabbitMQ; `pg` with plain SQL rather than an ORM, since the claim is a hand-written CTE an ORM would only obscure; `zod` for config; `pino` for logging; `prom-client` for metrics; `@playwright/test` for E2E, driven by its `webServer` config so a single command brings the stack up and tears it down. ESLint flat config with `typescript-eslint` for correctness, Prettier for formatting and nothing else, `tsc --noEmit` under `strict`, `pnpm audit --audit-level=high`, and a licence allowlist check — all five gating CI rather than advisory, per [`CLAUDE.md`](../CLAUDE.md). Every runtime dependency named above is MIT or Apache-2.0, so the allowlist costs nothing to satisfy; it exists to catch what arrives transitively. One `docker compose up` brings up RabbitMQ, Postgres, API, worker and frontend, with `TZ=UTC` set on every service and the Postgres connection pinned to UTC per §9.1.
 
-### 12.1 Serving the frontend — open, and owed a decision in phase 5
+### 12.1 Serving the frontend — decided in phase 5, revised on review: the API serves it
 
-Today the Vite dev server proxies `/api` and `/socket.io` to the API, which works for development and **quietly leaves production unanswered**: `vite build` produces `apps/web/dist` and nothing serves it. There is no `web` target in the Dockerfile.
+`vite build` produces `apps/web/dist` and something has to serve it. The first attempt added an nginx service that served the SPA and reverse-proxied `/api` and `/socket.io` to the API. Review killed it, correctly, and the reasons generalise beyond this repo.
 
-[`@fastify/vite`](https://vite.fastify.dev/) closes both ends in about eight lines — Vite as middleware in development, the built bundle in production — and would drop a process and the proxy block from `pnpm dev`. It is the obvious answer for development and is adopted in phase 5.
+**Decision: the API serves the built SPA from `WEB_ROOT`, and routing to it is left to whatever is already in front.** One image, one process, one origin.
 
-Production is the part that needs deciding rather than defaulting:
+The nginx version embedded `proxy_pass http://api:3000` in an image. That is a *deployment topology* compiled into a build artefact, and it fails in every environment that is not the Compose file it was written for:
 
-- **Served by the API.** Simplest, one artefact, one command. But every horizontally-scaled replica then also serves static files, on precisely the process this design exists to keep responsive under load — and the `api` image has to carry `apps/web/dist`, coupling two builds that are otherwise independent.
-- **Served by a CDN or static host.** What a real flash sale does. Assets are immutable and cacheable, the API tier stays dedicated to the API, and the two deploy separately. It costs a second deployment target that the brief explicitly does not require.
+- **Outside Compose** — API and worker against a Postgres and RabbitMQ already on the host — the upstream name does not resolve, so the image is useless exactly when someone wants to run the app the simplest way.
+- **Under Kubernetes** the proxying is redundant. An Ingress or an HTTPRoute already expresses "`/api` to this Service, `/` to that one", declaratively, in the chart. Shipping nginx too means two layers of routing, a second Deployment to run and scale, an extra hop on every request, and path rules that can only be changed by rebuilding an image. The upstream would also have to be templated per release, since the Service is `{{ .Release.Name }}-api`.
 
-The decision is deferred rather than dodged: it changes what goes into the `api` image, so it is worth making once the frontend exists rather than guessing now against a placeholder page.
+Serving the SPA from the API costs little. The assets are hashed and immutable, so each client fetches them once; and for a flash sale they are fetched while the countdown runs, not at `T=0` when the buy spike lands. The two are not contemporaneous, which is what the "don't put static files on the hot path" instinct is really about.
 
-Two infrastructure components, not three — dropping Redis is a direct consequence of the queue owning the decision, and it is worth calling out in the README as a simplification rather than leaving it unremarked.
+What remains true from the original argument is that assets should not be served from an origin at scale — but the answer to that is a CDN, not a second container. `WEB_ROOT` is therefore optional: leave it unset and the process is a pure API, with `/` routed to a bucket or CDN by the gateway. The same image covers both, and nothing about the application changes.
+
+This is not `@fastify/vite`, which was also considered and rejected. That plugin couples Vite into the server for SSR and dev middleware; what is needed here is `@fastify/static` pointed at a directory, in production only. Development keeps the Vite dev server and its proxy, which already worked.
+
+Two details the fallback must get right, both quiet when wrong:
+
+- The static plugin is registered with `wildcard: false` and the SPA fallback lives in `setNotFoundHandler`. A wildcard route would answer unknown `/api` paths with the HTML shell, so a mistyped endpoint returns `200` and the client fails later, parsing HTML as JSON.
+- Only navigations get the shell — `GET`/`HEAD` with `Accept: text/html`, outside the server's own prefixes. Everything else keeps the API's JSON `404`.
+
+#### Trusting `X-Forwarded-For`
+
+Removing nginx exposed a bug it had been hiding. The nginx config set `X-Forwarded-For` and a comment claimed this kept the per-IP rate limiter (§6) from collapsing into one bucket. It did not: Fastify's `trustProxy` defaults to `false`, so `request.ip` stayed the socket peer — nginx — and *every* request shared one bucket. Setting the header without trusting it does nothing. Measured: with `trustProxy` off, three requests from three forwarded addresses against `max: 2` return `200, 200, 429`; with it on, `200, 200, 200`.
+
+So trust is now explicit, in `TRUST_PROXY`, and defaults to off:
+
+- **off** — `request.ip` is the socket peer. Correct when the process is reachable directly, as it is under Compose.
+- **a list of addresses or CIDRs** — the safe production setting behind a gateway.
+- **`true`** — trusts the whole chain, which means the client chooses its own `request.ip` and can mint a fresh rate-limit bucket per request. Only acceptable where nothing but the gateway can reach the process *and* the gateway overwrites the header rather than appending to it.
+- **a hop count is rejected at boot.** Fastify maps a numeric `trustProxy` to a function that trusts nothing, deliberately, because a hop count cannot validate the immediate peer. Accepting one would read as configured while trusting nobody, so the config refuses it with a message saying what to use instead.
+
+#### What a Helm chart would look like
+
+Nothing here needs to change for it. Two Deployments, `api` and `worker`, from the two images; a Service for `api`; an HTTPRoute (or Ingress) sending `/` to it. `TRUST_PROXY` is set to the gateway's CIDR, which is what makes per-IP limiting work behind it. Moving the SPA to a CDN later means unsetting `WEB_ROOT` and adding a route — no rebuild, no code change.
+
+The remaining caveats are unchanged and documented elsewhere: rate limits are per instance (§6), so N replicas allow N times the configured limit, and presence is eventually consistent across instances (§8).
 
 ## 13. Implementation phases
 

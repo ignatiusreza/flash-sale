@@ -11,8 +11,11 @@ afterEach(async () => {
 });
 
 /** A bare server with the hook on one route, so these test the hook alone. */
-async function serverWith(specs: readonly LimitSpec[]): Promise<FastifyInstance> {
-  const instance = Fastify();
+async function serverWith(
+  specs: readonly LimitSpec[],
+  trustProxy: boolean = false,
+): Promise<FastifyInstance> {
+  const instance = Fastify({ trustProxy });
   await instance.register(rateLimitPlugin, { global: false });
   instance.post('/t', { preHandler: rateLimit(instance, specs) }, async () => ({ ok: true }));
   return instance;
@@ -89,5 +92,44 @@ describe('rateLimit hook', () => {
     for (let i = 0; i < 5; i++) codes.push((await post(app, 'a')).statusCode);
 
     expect(codes.every((c) => c === 200)).toBe(true);
+  });
+});
+
+/**
+ * The default key is `request.ip`, and what that means depends on `trustProxy`.
+ * Behind a gateway every connection comes from the same place, so the setting
+ * is the difference between a per-client limit and one global one — and it
+ * fails quietly either way, which is why both directions are pinned here.
+ */
+describe('keying by client address behind a proxy', () => {
+  const forwarded = (instance: FastifyInstance, ip: string) =>
+    instance.inject({
+      method: 'POST',
+      url: '/t',
+      payload: { userId: 'a' },
+      headers: { 'x-forwarded-for': ip },
+      remoteAddress: '10.0.0.1',
+    });
+
+  it('collapses every client into one bucket when the header is not trusted', async () => {
+    app = await serverWith([{ max: 2 }]);
+
+    const codes = [];
+    for (const ip of ['1.1.1.1', '2.2.2.2', '3.3.3.3']) {
+      codes.push((await forwarded(app, ip)).statusCode);
+    }
+
+    expect(codes).toEqual([200, 200, 429]);
+  });
+
+  it('gives each forwarded client its own bucket once the header is trusted', async () => {
+    app = await serverWith([{ max: 2 }], true);
+
+    const codes = [];
+    for (const ip of ['1.1.1.1', '2.2.2.2', '3.3.3.3']) {
+      codes.push((await forwarded(app, ip)).statusCode);
+    }
+
+    expect(codes).toEqual([200, 200, 200]);
   });
 });

@@ -27,13 +27,13 @@ export const openApiDocument = {
       version: '0.1.0',
       description:
         'A flash sale for a single product with limited stock.\n\n' +
-        'Purchases are **asynchronous**: `POST /api/purchase` returns 202 once the attempt is ' +
+        'Purchases are **asynchronous**: `POST /api/orders` returns 202 once the attempt is ' +
         'durably queued, and the outcome is pushed over a WebSocket. That is what lets the system ' +
         'answer under load without ever overselling — see `docs/PLAN.md`.',
     },
     tags: [
       { name: 'sale', description: 'Sale status' },
-      { name: 'purchase', description: 'Attempting and checking purchases' },
+      { name: 'orders', description: 'Purchasing (creating an order) and listing a user’s orders' },
       { name: 'health', description: 'Liveness and readiness' },
     ],
   },

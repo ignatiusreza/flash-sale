@@ -1,6 +1,6 @@
 # Multi-stage build. Targets:
 #   test    — runs the gates against the compose services (`runner` in compose)
-#   api     — the API server
+#   api     — the API server, which also serves the built SPA
 #   worker  — the queue consumer
 #
 # Dependency manifests are copied before the sources so that editing a source
@@ -47,8 +47,13 @@ FROM build AS prune-api
 RUN pnpm --filter @flash-sale/api deploy --prod --legacy /out
 
 FROM base AS api
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    WEB_ROOT=/app/public
 COPY --from=prune-api /out /app
+# The built SPA ships with the API, which serves it on the same origin. Unset
+# WEB_ROOT to run this as a pure API and let a CDN or the gateway serve the
+# frontend instead (docs/PLAN.md §12.1).
+COPY --from=build /app/apps/web/dist /app/public
 USER node
 CMD ["node", "dist/index.js"]
 
