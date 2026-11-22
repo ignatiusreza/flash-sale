@@ -19,6 +19,19 @@ Interactive docs are served at **`/docs`**, with the OpenAPI document at `/docs/
 
 `POST /api/purchase` answers **202, not 200**: the outcome arrives over the socket. It returns only after the broker has confirmed the publish, which is what makes that promise keepable — an unconfirmed publish could vanish and leave the user waiting forever.
 
+## Vocabulary
+
+Four words, kept distinct in code, the API and the messages:
+
+| Word | Means | In code |
+| --- | --- | --- |
+| **purchase** | the act — what a user does by pressing *Buy now* | `POST /api/purchase`, `purchase()`, `canPurchase`, `purchaseState` (where this user's purchasing stands) |
+| **attempt** | one queued request that a purchase produces; it may or may not succeed | `PurchaseAttempt`, `attemptId`, queue `purchase.attempts` |
+| **result** | the worker's decision on an attempt | `PurchaseResult`, `purchase:result`; `confirmed`, `already_purchased`, `sold_out`, `not_started`, `ended` |
+| **order** | the row a successful attempt leaves behind — the only durable proof of a sale | `orders` table, `orderId`, `findOrder` |
+
+*Buy* is the button's wording, not a term in the code.
+
 ## The claim
 
 `apps/worker/src/claim.ts` is the heart of the system: a single SQL statement that claims up to N units in arrival order, decrementing stock by the rows it *actually* inserted rather than by the batch size — which is what makes a redelivered batch a no-op instead of silently destroying stock.
