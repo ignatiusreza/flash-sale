@@ -28,6 +28,7 @@ export interface TestServerOptions {
   view?: SaleView | undefined;
   pool?: pg.Pool;
   rateLimitPerMinute?: number;
+  lookupLimitPerMinute?: number;
   publish?: (attempt: unknown) => Promise<void>;
   /** Directory of a built SPA. Omitted, the server is API-only. */
   webRoot?: string;
@@ -57,6 +58,7 @@ export async function createTestServer(options: TestServerOptions = {}): Promise
     saleCache: options.saleCache ?? cacheOf('view' in options ? options.view : activeView),
     saleId: 'flash',
     rateLimitPerMinute: options.rateLimitPerMinute ?? 1000,
+    lookupLimitPerMinute: options.lookupLimitPerMinute ?? 1000,
     publish,
     ...(options.webRoot ? { webRoot: options.webRoot } : {}),
     ...(options.trustProxy === undefined ? {} : { trustProxy: options.trustProxy }),

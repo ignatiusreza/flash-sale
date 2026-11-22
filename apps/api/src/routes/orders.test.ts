@@ -234,4 +234,24 @@ describe('GET /api/orders?userId=', () => {
     expect(response.statusCode).toBe(400);
     expect(query).not.toHaveBeenCalled();
   });
+
+  // Every call is a database query, and any client may name any user: without
+  // a limit, the lookup is a way to load the database the worker claims on.
+  it('limits lookups per address, and refuses past it without querying', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    ({ app } = await createTestServer({
+      pool: { query } as unknown as pg.Pool,
+      lookupLimitPerMinute: 2,
+    }));
+    const lookup = (userId: string) =>
+      app.inject({ method: 'GET', url: `/api/orders?userId=${userId}` });
+
+    expect((await lookup('a')).statusCode).toBe(200);
+    expect((await lookup('b')).statusCode).toBe(200);
+    const limited = await lookup('c');
+
+    expect(limited.statusCode).toBe(429);
+    expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
+    expect(query).toHaveBeenCalledTimes(2);
+  });
 });

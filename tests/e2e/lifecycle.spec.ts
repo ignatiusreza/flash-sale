@@ -22,3 +22,21 @@ test('upcoming, then active, then ended — live', async ({ request, buyer }) =>
 
   expect(await page.evaluate(() => 'stillTheSamePage' in globalThis)).toBe(true);
 });
+
+/**
+ * Before typing a name, a visitor is still watching: the page must not sit on
+ * "upcoming" until they do. It connects anonymously, and counts as here.
+ */
+test('a visitor who has not given a name still sees the sale open, live', async ({
+  page,
+  request,
+}) => {
+  await seedSale(request, { startsInMs: 3_000 });
+  await page.goto('/');
+  const screen = ui(page);
+  await expect(screen.name).toHaveValue('');
+
+  await expect(screen.sale).toHaveAttribute('data-status', 'upcoming');
+  await expect(screen.viewers).toHaveText(/^[1-9]\d* (person|people) here$/);
+  await expect(screen.sale).toHaveAttribute('data-status', 'active', { timeout: 10_000 });
+});

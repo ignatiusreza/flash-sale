@@ -51,7 +51,12 @@ export async function handleBatch(
   }
   if (!claim) throw new Error('handleBatch called with an empty batch');
 
-  const windowStatus = saleStatusAt({ startAt: claim.startAt, endAt: claim.endAt }, new Date());
+  // By the clock that judged `open`: the worker's own could disagree with it
+  // at either edge, and label a refusal `ended` the moment the sale opened.
+  const windowStatus = saleStatusAt(
+    { startAt: claim.startAt, endAt: claim.endAt },
+    new Date(claim.at),
+  );
 
   // One branch per outcome, in the order they are reached: won, already held,
   // lost on stock, too early, too late. Five branches for the five values of

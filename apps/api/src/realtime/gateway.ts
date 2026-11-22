@@ -51,20 +51,22 @@ export function createGateway(options: GatewayOptions): Gateway {
     serveClient: false,
   });
 
-  // Refused during the handshake rather than after connecting. Nothing can be
-  // routed to an unidentified socket, so holding one is worse than refusing:
-  // the client would wait for results that can never arrive. Emitting a reason
-  // and then disconnecting races — the packet need not flush first — whereas a
-  // middleware rejection reaches the client as `connect_error`.
-  io.use((socket, next) => {
-    next(userIdOf(socket) ? undefined : new Error('userId required'));
-  });
+  // A visitor who has not given a name yet still watches the sale: they get
+  // its status and the viewer count, and count as a viewer, but nothing is
+  // routed to them — they cannot buy, so no result is ever theirs.
+  let anonymous = 0;
+  const viewers = () => registry.users + anonymous;
 
   io.on('connection', (socket) => {
-    const userId = userIdOf(socket)!;
+    const userId = userIdOf(socket);
 
-    registry.add(userId, socket);
-    socket.on('disconnect', () => registry.remove(userId, socket));
+    if (userId) {
+      registry.add(userId, socket);
+      socket.on('disconnect', () => registry.remove(userId, socket));
+    } else {
+      anonymous++;
+      socket.on('disconnect', () => anonymous--);
+    }
 
     // Greet with current state: a client that connects mid-sale should not
     // have to wait for the next broadcast to know what is going on.
@@ -74,7 +76,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     // Refresh our own entry before reading the total rather than adding to it:
     // once the timer has recorded this instance, `total()` already includes it,
     // and adding our own count again would double this instance.
-    presence.record(instanceId, registry.users);
+    presence.record(instanceId, viewers());
     socket.emit('sale:viewers', { count: presence.total() });
   });
 
@@ -108,10 +110,11 @@ export function createGateway(options: GatewayOptions): Gateway {
     // twice, and closing that would need the shared registry this design
     // deliberately avoids. Over-counting a decorative number slightly is the
     // cheaper mistake.
-    const own = registry.users;
+    const own = viewers();
     options.announcePresence?.(own, instanceId);
     presence.record(instanceId, own);
-    registry.broadcast('sale:viewers', { count: presence.total() });
+    // To every socket, named or not.
+    io.emit('sale:viewers', { count: presence.total() });
   }, options.presenceIntervalMs ?? 3_000);
   presenceTimer.unref();
 
@@ -123,7 +126,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     const signature = `${view.status}:${view.availability ?? ''}`;
     if (signature === lastStatus) return;
     lastStatus = signature;
-    registry.broadcast('sale:status', view);
+    io.emit('sale:status', view);
   }, options.statusIntervalMs ?? 1_000);
   statusTimer.unref();
 

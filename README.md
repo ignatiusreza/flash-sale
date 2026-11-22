@@ -169,8 +169,8 @@ The property under all of it: **nobody is told "confirmed" unless the order is c
 
 | Layer | What | Run |
 | --- | --- | --- |
-| Unit + integration | 180 tests. The invariants through the real queue and worker: 2 000 attempts for 50 units, a quarter repeats, yield exactly 50 orders, one answer per attempt, and **confirmed results equal to the orders**; a worker **killed between commit and ack** has its batch replayed as the same order, stock moved once. The claim alone under concurrency: **never oversells** (20 000 attempts against 1 000 units) and **never grants one buyer two units**. Redelivery, dead-lettering and failure handling against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
-| End to end | 19 Playwright specs against the built app | `pnpm test:e2e` |
+| Unit + integration | 183 tests. The invariants through the real queue and worker: 2 000 attempts for 50 units, a quarter repeats, yield exactly 50 orders, one answer per attempt, and **confirmed results equal to the orders**; a worker **killed between commit and ack** has its batch replayed as the same order, stock moved once. The claim alone under concurrency: **never oversells** (20 000 attempts against 1 000 units) and **never grants one buyer two units**. Redelivery, dead-lettering and failure handling against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
+| End to end | 20 Playwright specs against the built app | `pnpm test:e2e` |
 | Stress | k6 scenarios, then the invariants checked in Postgres | `pnpm stress <scenario>` |
 
 CI runs the first two on every pull request — the unit suite twice, once in a non-UTC timezone, since a suite that only passes in UTC cannot catch code that depends on the local zone.
@@ -188,7 +188,7 @@ Playwright drives real browsers against a stack it starts itself (the API servin
 | `refresh` | a refresh mid-purchase keeps it, and the outcome still lands — the order, or *sold out* |
 | `concurrency` | five buyers race for two units: two hold, three see *sold out* |
 | `presence` | the viewer count follows people arriving and leaving |
-| `lifecycle` | *upcoming → active → ended*, live, with no reload |
+| `lifecycle` | *upcoming → active → ended*, live, with no reload — also for a visitor who has not typed a name |
 | `time` | one instant shown in Tokyo and St John's, each labelled; a browser clock two hours fast leaves the countdown right |
 | `rejection` | not yet open, ended, already held, `503`, `429` — each ends in a message |
 | `double-click` | exactly one attempt sent |
@@ -236,14 +236,14 @@ Interactive docs at **`/docs`** (OpenAPI at `/docs/json`), generated from the sa
 | --- | --- | --- |
 | `GET` | `/api/sale` | status, coarse availability, window, `serverTime` — served from memory |
 | `POST` | `/api/orders` | create: `202` with `attemptId` once the broker confirms, `Location` → the buyer's orders · `409` not open / ended / sold out · `429` · `503` |
-| `GET` | `/api/orders?userId=` | index, filtered by buyer: `[]` or their one order · `400` without the filter |
+| `GET` | `/api/orders?userId=` | index, filtered by buyer: `[]` or their one order · `400` without the filter · `429` past the per-address limit |
 | `GET` | `/healthz` `/readyz` | live once up; ready once the sale is loaded |
 
 Orders are a REST resource with `create` and a filtered `index`. `create` answers `202 Accepted`, not `201 Created`, because the order is decided asynchronously. The lookup is a filtered `index` rather than a `show`, because a reconnecting client knows the buyer, not the order id; the filter is required, since unfiltered it would list every buyer to anyone.
 
 ### Realtime
 
-Clients connect a Socket.IO socket identifying the buyer, and receive:
+Clients connect a Socket.IO socket identifying the buyer — or no one yet, before a name is typed: such a socket gets the sale's status and the viewer count, and counts as a viewer, but no results. They receive:
 
 | Event | When |
 | --- | --- |
@@ -264,8 +264,8 @@ Results go to **every** socket of the buyer, on every instance — so a buyer's 
 
 ## Known limitations
 
-- **No authentication.** A buyer is whatever name they type; the brief asks for an identifier, not accounts. The order lookup requires a buyer filter so it cannot list everyone.
-- **Rate limits are per API instance**, so N instances allow N× the configured rate. A shared counter would put a store on every request; the bounded queue and the claim are what actually protect the sale.
+- **No authentication.** A buyer is whatever name they type; the brief asks for an identifier, not accounts. The order lookup requires a buyer filter so it cannot list everyone. It follows that **anyone can watch anyone**: a socket connected as a name receives that buyer's results and order id, and the lookup answers for any name. A verified session would key both.
+- **Rate limits are per API instance**, so N instances allow N× the configured rate. A shared counter would put a store on every request; the bounded queue and the claim are what actually protect the sale. The order lookup is limited per address too, but a limit cannot stop many clients at once: an instance dying sends all its clients to re-sync together, spread only by Socket.IO's randomised reconnect backoff — each a single index probe.
 - **The viewer count is approximate** — it converges within a few seconds, and a buyer connected to two instances counts twice. It is decorative.
 - **One broker locally.** Production would run the quorum queue on a three-node cluster (PLAN §5.1); Compose runs one node to keep the first run fast.
 - **One sale at a time**, configured by `SALE_ID`.

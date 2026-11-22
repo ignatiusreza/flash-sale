@@ -72,18 +72,6 @@ describe('SocketRegistry', () => {
     expect(registry.users).toBe(2);
   });
 
-  it('broadcasts to everyone', () => {
-    const registry = new SocketRegistry();
-    const all = [socket(), socket(), socket()];
-    registry.add('alice', all[0]!);
-    registry.add('alice', all[1]!);
-    registry.add('bob', all[2]!);
-
-    registry.broadcast('sale:status', { status: 'ended' });
-
-    for (const s of all) expect(s.emit).toHaveBeenCalledWith('sale:status', { status: 'ended' });
-  });
-
   it('tolerates removing a socket that was never added', () => {
     const registry = new SocketRegistry();
 

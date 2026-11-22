@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 
 /**
- * The page's one Socket.IO connection, identified as `userId` and connected
- * only while there is one.
+ * The page's one Socket.IO connection, identified as `userId` once there is
+ * one. Connected before that too, anonymously: a visitor still watching the
+ * page, name not yet typed, sees the sale open, close or sell out live. A new
+ * name reconnects, so the server routes that user's results here.
  *
  * The socket object exists from the first render, unconnected, so every
  * consumer can attach its listeners in its own effect before the connection
@@ -26,8 +28,7 @@ export function useSocket(userId: string | undefined): { socket: Socket; connect
   }, [socket]);
 
   useEffect(() => {
-    if (!userId) return;
-    socket.auth = { userId };
+    socket.auth = userId ? { userId } : {};
 
     // Connect a tick later: StrictMode mounts, unmounts and remounts in one
     // synchronous pass, so the throwaway mount is cleaned up before it ever

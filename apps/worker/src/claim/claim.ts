@@ -15,6 +15,8 @@ export interface ClaimResult {
   /** The window, so callers can tell *not started* from *ended*. ISO 8601, UTC. */
   readonly startAt: string;
   readonly endAt: string;
+  /** The database's `now()`, which judged `open`: the clock to tell them apart by. */
+  readonly at: string;
 }
 
 /**
@@ -87,6 +89,7 @@ RETURNING
   l.open,
   l.start_at,
   l.end_at,
+  now() AS at,
   COALESCE(
     (SELECT json_agg(json_build_object('orderId', id, 'userId', user_id)) FROM ins),
     '[]'::json
@@ -98,6 +101,7 @@ interface ClaimRow {
   open: boolean;
   start_at: Date;
   end_at: Date;
+  at: Date;
   granted: Grant[];
 }
 
@@ -122,6 +126,7 @@ export async function claimBatch(
     open: row.open,
     startAt: row.start_at.toISOString(),
     endAt: row.end_at.toISOString(),
+    at: row.at.toISOString(),
   };
 }
 

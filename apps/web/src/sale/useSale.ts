@@ -27,24 +27,36 @@ export function useSale(socket: Socket): {
   const [sale, setSale] = useState<SaleSnapshot | undefined>();
   const [offsetMs, setOffsetMs] = useState(0);
 
+  // On arrival, and again on every connect: the offset drifts, and after a
+  // disconnect the snapshot may be stale.
   useEffect(() => {
     let cancelled = false;
 
-    void fetch('/api/sale')
-      .then((response) => (response.ok ? response.json() : undefined))
-      .then((body) => {
-        if (cancelled || !body) return;
-        setSale(body as SaleSnapshot);
-        setOffsetMs(clockOffset((body as { serverTime: string }).serverTime));
-      })
-      .catch(() => {
-        /* the socket will supply status once it connects */
-      });
+    const load = () => {
+      const sentAt = Date.now();
+      void fetch('/api/sale')
+        .then((response) => (response.ok ? response.json() : undefined))
+        .then((body) => {
+          if (cancelled || !body) return;
+          setSale(body as SaleSnapshot);
+          // `serverTime` was read somewhere between sending and receiving:
+          // take the midpoint, not the arrival, or the countdown runs a
+          // one-way trip ahead.
+          const midpoint = (sentAt + Date.now()) / 2;
+          setOffsetMs(clockOffset((body as { serverTime: string }).serverTime, midpoint));
+        })
+        .catch(() => {
+          /* the socket will supply status once it connects */
+        });
+    };
+    load();
+    socket.on('connect', load);
 
     return () => {
       cancelled = true;
+      socket.off('connect', load);
     };
-  }, []);
+  }, [socket]);
 
   useSocketEvent<SaleSnapshot>(socket, 'sale:status', setSale);
 
