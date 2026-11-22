@@ -58,6 +58,13 @@ export default tseslint.config(
     rules: {
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
+      // From the React Compiler. A state reset belongs in render, guarded by
+      // the previous value: in an effect, every effect of that commit still
+      // sees the stale state (usePurchase, #11).
+      'react-hooks/set-state-in-render': 'error',
+      'react-hooks/set-state-in-effect': 'error',
+      'react-hooks/refs': 'error',
+      'react-hooks/purity': 'error',
       // The new JSX transform means React need not be in scope.
       'react/react-in-jsx-scope': 'off',
     },

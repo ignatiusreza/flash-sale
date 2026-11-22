@@ -10,15 +10,7 @@ import type { Availability, PurchaseResultEvent, SaleStatus } from '@flash-sale/
 export type PurchaseState =
   | { readonly status: 'idle' }
   | { readonly status: 'submitting' }
-  | {
-      readonly status: 'queued';
-      readonly attemptId: string;
-      /**
-       * Restored after a refresh rather than sent by this page: its result
-       * may have been missed, so only it may be settled from the sale.
-       */
-      readonly restored?: true;
-    }
+  | { readonly status: 'queued'; readonly attemptId: string }
   | { readonly status: 'held'; readonly orderId: string }
   | { readonly status: 'rejected'; readonly reason: 'sold_out' | 'not_started' | 'ended' }
   | { readonly status: 'busy' }
@@ -27,9 +19,13 @@ export type PurchaseState =
 
 export const idle: PurchaseState = { status: 'idle' };
 
-/** True once there is nothing left for this user to do. */
+/**
+ * True once there is nothing left for this user to do. Not after
+ * `not_started`: that one only says "too early", and the sale opening is
+ * exactly when the user should be able to try again.
+ */
 export function isTerminal(state: PurchaseState): boolean {
-  return state.status === 'held' || state.status === 'rejected';
+  return state.status === 'held' || (state.status === 'rejected' && state.reason !== 'not_started');
 }
 
 /** True while a click would be pointless or harmful. */
@@ -47,16 +43,22 @@ export function attemptOf(state: PurchaseState): string | undefined {
 }
 
 /**
- * Whether a purchase can be started: someone to purchase for, a sale open
- * with stock, and nothing in flight or already settled for this user.
+ * Whether a purchase can be started: someone to purchase for, a socket to hear
+ * the result on, a sale open with stock, and nothing in flight or already
+ * settled for this user.
+ *
+ * The socket matters because results are pushed, not fetched: one decided
+ * before the server has registered this user's socket goes nowhere.
  */
 export function canPurchase(
   state: PurchaseState,
   userId: string,
   sale: { readonly status: SaleStatus; readonly availability?: Availability } | undefined,
+  connected: boolean,
 ): boolean {
   return (
     Boolean(userId) &&
+    connected &&
     sale?.status === 'active' &&
     sale.availability !== 'sold_out' &&
     !isBusy(state) &&
@@ -91,16 +93,17 @@ export function livePending(
 }
 
 /**
- * The outcome a restored attempt must have had, given that the user holds no
+ * The outcome a waiting attempt must have had, given that the user holds no
  * order: once the sale has ended or sold out it can no longer succeed.
  * Undefined while it still could.
  *
- * Only for attempts restored after a refresh, whose result may have been
- * missed, and only after a lookup has found no order. A live attempt gets its
- * result over the socket, and the "sold out" push can arrive just before the
- * result of the purchase that took the last unit.
+ * For any attempt whose result may have been missed — restored after a
+ * refresh, or sent while the socket later dropped — and only after a fresh
+ * lookup has found no order. That lookup cannot miss a winner: the sale reads
+ * as sold out only once the claim that took the last unit has committed, and
+ * that claim's orders with it.
  */
-export function restoredOutcome(
+export function outcomeFromSale(
   sale: { readonly status: SaleStatus; readonly availability?: Availability } | undefined,
 ): PurchaseState | undefined {
   if (sale?.status === 'ended') return { status: 'rejected', reason: 'ended' };

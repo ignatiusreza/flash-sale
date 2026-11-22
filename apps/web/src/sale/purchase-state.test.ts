@@ -12,7 +12,7 @@ import {
   isTerminal,
   livePending,
   PENDING_TTL_MS,
-  restoredOutcome,
+  outcomeFromSale,
 } from './purchase-state.js';
 
 const queued = { status: 'queued', attemptId: 'ours' } as const;
@@ -144,6 +144,8 @@ describe('state predicates', () => {
   it('treats held and rejected as terminal', () => {
     expect(isTerminal({ status: 'held', orderId: 'o' })).toBe(true);
     expect(isTerminal({ status: 'rejected', reason: 'ended' })).toBe(true);
+    // Too early is not final: the sale opening is when to try again.
+    expect(isTerminal({ status: 'rejected', reason: 'not_started' })).toBe(false);
     expect(isTerminal(idle)).toBe(false);
   });
 
@@ -158,34 +160,47 @@ describe('canPurchase', () => {
   const open = { status: 'active', availability: 'plenty' } as const;
 
   it('allows a named user into an open sale with stock', () => {
-    expect(canPurchase(idle, 'alice', open)).toBe(true);
+    expect(canPurchase(idle, 'alice', open, true)).toBe(true);
+  });
+
+  // A result decided before the server registered this user's socket is
+  // pushed to nobody, and the page waits on it forever.
+  it('needs the socket connected', () => {
+    expect(canPurchase(idle, 'alice', open, false)).toBe(false);
+  });
+
+  it('allows a retry once the sale opens after a too-early attempt', () => {
+    expect(canPurchase({ status: 'rejected', reason: 'not_started' }, 'alice', open, true)).toBe(
+      true,
+    );
   });
 
   it('needs a name', () => {
-    expect(canPurchase(idle, '', open)).toBe(false);
+    expect(canPurchase(idle, '', open, true)).toBe(false);
   });
 
   it('needs the sale to be open and in stock', () => {
-    expect(canPurchase(idle, 'alice', undefined)).toBe(false);
-    expect(canPurchase(idle, 'alice', { status: 'upcoming' })).toBe(false);
-    expect(canPurchase(idle, 'alice', { status: 'ended' })).toBe(false);
-    expect(canPurchase(idle, 'alice', { status: 'active', availability: 'sold_out' })).toBe(false);
+    expect(canPurchase(idle, 'alice', undefined, true)).toBe(false);
+    expect(canPurchase(idle, 'alice', { status: 'upcoming' }, true)).toBe(false);
+    expect(canPurchase(idle, 'alice', { status: 'ended' }, true)).toBe(false);
+    expect(canPurchase(idle, 'alice', { status: 'active', availability: 'sold_out' }, true)).toBe(
+      false,
+    );
   });
 
   // Retrying after `busy` or `failed` is what those states are for, so only
   // in-flight and settled states block the button.
   it('blocks while in flight or settled, not after a retryable failure', () => {
-    expect(canPurchase(queued, 'alice', open)).toBe(false);
-    expect(canPurchase({ status: 'held', orderId: 'o1' }, 'alice', open)).toBe(false);
-    expect(canPurchase({ status: 'busy' }, 'alice', open)).toBe(true);
-    expect(canPurchase({ status: 'failed', message: 'x' }, 'alice', open)).toBe(true);
+    expect(canPurchase(queued, 'alice', open, true)).toBe(false);
+    expect(canPurchase({ status: 'held', orderId: 'o1' }, 'alice', open, true)).toBe(false);
+    expect(canPurchase({ status: 'busy' }, 'alice', open, true)).toBe(true);
+    expect(canPurchase({ status: 'failed', message: 'x' }, 'alice', open, true)).toBe(true);
   });
 });
 
 describe('attemptOf', () => {
-  it('is the attempt being waited on, restored or not', () => {
+  it('is the attempt being waited on', () => {
     expect(attemptOf(queued)).toBe('ours');
-    expect(attemptOf({ ...queued, restored: true })).toBe('ours');
   });
 
   // Before the 202 nobody knows it; once decided, nothing is waited on.
@@ -213,21 +228,21 @@ describe('livePending', () => {
   });
 });
 
-describe('restoredOutcome', () => {
+describe('outcomeFromSale', () => {
   it('fails an attempt once the sale has ended', () => {
-    expect(restoredOutcome({ status: 'ended' })).toEqual({ status: 'rejected', reason: 'ended' });
+    expect(outcomeFromSale({ status: 'ended' })).toEqual({ status: 'rejected', reason: 'ended' });
   });
 
   it('fails an attempt once the sale has sold out', () => {
-    expect(restoredOutcome({ status: 'active', availability: 'sold_out' })).toEqual({
+    expect(outcomeFromSale({ status: 'active', availability: 'sold_out' })).toEqual({
       status: 'rejected',
       reason: 'sold_out',
     });
   });
 
   it('leaves it undecided while it could still succeed', () => {
-    expect(restoredOutcome({ status: 'active', availability: 'low' })).toBeUndefined();
-    expect(restoredOutcome({ status: 'upcoming' })).toBeUndefined();
-    expect(restoredOutcome(undefined)).toBeUndefined();
+    expect(outcomeFromSale({ status: 'active', availability: 'low' })).toBeUndefined();
+    expect(outcomeFromSale({ status: 'upcoming' })).toBeUndefined();
+    expect(outcomeFromSale(undefined)).toBeUndefined();
   });
 });

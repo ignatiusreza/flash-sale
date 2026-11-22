@@ -5,28 +5,39 @@ import { findOrder } from './api.js';
 import { clearPending, loadPending, savePending } from './pending-attempt.js';
 import {
   idle,
-  isTerminal,
   livePending,
+  outcomeFromSale,
   PENDING_TTL_MS,
-  restoredOutcome,
   type PurchaseState,
 } from './purchase-state.js';
 
 type Sale = { readonly status: SaleStatus; readonly availability?: Availability } | undefined;
 
-/** True while `state` is still the restored attempt `attemptId`. */
-function stillRestored(state: PurchaseState, attemptId: string): boolean {
-  return state.status === 'queued' && state.restored === true && state.attemptId === attemptId;
+/**
+ * Where a page starts for `userId`: waiting on the attempt they left pending,
+ * or from nothing. Read during render, when the identity is first known or
+ * changes, so no effect ever sees one user's state under another's name.
+ */
+export function initialPurchaseState(userId: string): PurchaseState {
+  const pending = userId ? livePending(loadPending(userId), Date.now()) : undefined;
+  return pending ? { status: 'queued', attemptId: pending.attemptId } : idle;
+}
+
+/** True while `state` is still waiting on `attemptId`. */
+function stillWaiting(state: PurchaseState, attemptId: string): boolean {
+  return state.status === 'queued' && state.attemptId === attemptId;
 }
 
 /**
- * Keeps an undecided attempt across a refresh. The queue holds requests, not
- * anything a page can look up, so without this a reloaded page offers Buy
- * again mid-purchase and cannot recognise the attempt's result as its own.
+ * Keeps an undecided attempt across a refresh, and makes sure every attempt
+ * is eventually decided on the page even if its result never arrives.
  *
- * It remembers the attempt until it is decided, restores it on arrival (and
- * for each new identity), settles one whose result was missed, and lets one
- * go that nobody has decided within `PENDING_TTL_MS`.
+ * The queue holds requests, not anything a page can look up, so without this a
+ * reloaded page offers Buy again mid-purchase and cannot recognise the
+ * attempt's result as its own. And a result pushed while the socket was down
+ * is gone: the order lookup on reconnect recovers a win, but not a rejection.
+ * So a waiting attempt — restored or sent by this page — is settled from the
+ * sale once it can no longer succeed, and let go after `PENDING_TTL_MS`.
  */
 export function usePendingAttempt(
   userId: string,
@@ -42,32 +53,27 @@ export function usePendingAttempt(
       if (loadPending(userId)?.attemptId !== purchaseState.attemptId) {
         savePending(userId, { attemptId: purchaseState.attemptId, since: Date.now() });
       }
-    } else if (isTerminal(purchaseState)) {
+    } else if (purchaseState.status === 'held' || purchaseState.status === 'rejected') {
       clearPending(userId);
     }
   }, [userId, purchaseState]);
 
-  // On arrival and for each new identity: start from what this user left
-  // pending, or from nothing. Let it go once it is too old to wait for.
+  const waitingId = purchaseState.status === 'queued' ? purchaseState.attemptId : undefined;
+
+  // Let go of an attempt nobody has decided within the TTL: its result was
+  // missed, and the lookup says whether it won.
   useEffect(() => {
-    if (!userId) return;
-
-    const pending = livePending(loadPending(userId), Date.now());
-    if (!pending) {
-      clearPending(userId);
-      setPurchaseState(idle);
-      return;
-    }
-    setPurchaseState({ status: 'queued', attemptId: pending.attemptId, restored: true });
-
+    if (!userId || !waitingId) return;
     let cancelled = false;
+    const since = loadPending(userId)?.since ?? Date.now();
+
     const expiry = setTimeout(
       () => {
         void findOrder(userId).then((orderId) => {
           if (cancelled) return;
           if (!orderId) clearPending(userId);
           setPurchaseState((current) =>
-            stillRestored(current, pending.attemptId)
+            stillWaiting(current, waitingId)
               ? orderId
                 ? { status: 'held', orderId }
                 : idle
@@ -75,32 +81,28 @@ export function usePendingAttempt(
           );
         });
       },
-      pending.since + PENDING_TTL_MS - Date.now(),
+      since + PENDING_TTL_MS - Date.now(),
     );
 
     return () => {
       cancelled = true;
       clearTimeout(expiry);
     };
-  }, [userId, setPurchaseState]);
+  }, [userId, waitingId, setPurchaseState]);
 
-  // Once the sale has ended or sold out, a restored attempt without an order
+  // Once the sale has ended or sold out, a waiting attempt without an order
   // has failed, whether or not its result ever reached a page. Confirmed with
-  // a fresh lookup first: it may have won before the sale sold out.
-  const restoredId =
-    purchaseState.status === 'queued' && purchaseState.restored
-      ? purchaseState.attemptId
-      : undefined;
-  const outcome = restoredOutcome(sale);
+  // a fresh lookup first: it may have won the last unit.
+  const outcome = outcomeFromSale(sale);
   const failedBecause = outcome?.status === 'rejected' ? outcome.reason : undefined;
   useEffect(() => {
-    if (!userId || !restoredId || !failedBecause) return;
+    if (!userId || !waitingId || !failedBecause) return;
     let cancelled = false;
 
     void findOrder(userId).then((orderId) => {
       if (cancelled) return;
       setPurchaseState((current) =>
-        stillRestored(current, restoredId)
+        stillWaiting(current, waitingId)
           ? orderId
             ? { status: 'held', orderId }
             : { status: 'rejected', reason: failedBecause }
@@ -111,5 +113,5 @@ export function usePendingAttempt(
     return () => {
       cancelled = true;
     };
-  }, [userId, restoredId, failedBecause, setPurchaseState]);
+  }, [userId, waitingId, failedBecause, setPurchaseState]);
 }
