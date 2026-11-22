@@ -150,7 +150,7 @@ Each is argued at length, with measurements, in `docs/PLAN.md`.
 | Worker dies mid-batch | The transaction rolls back; the messages were never acked, so they are redelivered to the standby worker, which the broker promotes. |
 | Worker dies after commit, before ack | The batch is redelivered; the claim inserts nothing for buyers who already hold an order, so it is a no-op. |
 | API instance dies | Its sockets drop; clients reconnect to another instance and re-sync their order from `GET /api/orders`. Queued attempts are unaffected. |
-| A result is lost — socket down, or page refreshed mid-purchase | The page looks the buyer's order up every time its socket connects; on a refresh it restores the attempt it was waiting on. A lost win is found by that lookup; a lost rejection is settled from the sale once it has sold out or ended, and an attempt nobody decides is let go after two minutes. Buy stays disabled until the socket is connected, so no result is decided before there is somewhere to send it. |
+| A result is lost — socket down, or page refreshed mid-purchase | The page looks the buyer's order up every time its socket connects; on a refresh it restores the attempt it was waiting on. A lost win is found by that lookup; a lost rejection is settled from the sale once it has sold out or ended, and an attempt nobody decides is let go after two minutes. A lookup that fails — rate limited, a server error, no network — is retried, never read as "no order", so a winner is never told they lost. Buy stays disabled until the socket is connected, so no result is decided before there is somewhere to send it. |
 | Postgres down | The worker holds its batch unacked and retries it with backoff; the broker stops delivering, the queue fills to its bound, then the API sheds with `503`. When Postgres returns, every accepted attempt is claimed. Verified: 20 attempts accepted during an outage, all 20 orders once it ended. |
 | Traffic beyond capacity | The queue is bounded; past it the API answers `503` immediately instead of queueing without limit. Measured: every accepted attempt still became an order. |
 | A broker node dies | (Production topology.) The quorum queue elects a new leader within seconds; a confirm means a majority already held the message. |
@@ -169,8 +169,8 @@ The property under all of it: **nobody is told "confirmed" unless the order is c
 
 | Layer | What | Run |
 | --- | --- | --- |
-| Unit + integration | 187 tests. The invariants through the real queue and worker: 2 000 attempts for 50 units, a quarter repeats, yield exactly 50 orders, one answer per attempt, and **confirmed results equal to the orders**; a worker **killed between commit and ack** has its batch replayed as the same order, stock moved once. The claim alone under concurrency: **never oversells** (20 000 attempts against 1 000 units) and **never grants one buyer two units**. Redelivery, dead-lettering and failure handling against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
-| End to end | 20 Playwright specs against the built app | `pnpm test:e2e` |
+| Unit + integration | 192 tests. The invariants through the real queue and worker: 2 000 attempts for 50 units, a quarter repeats, yield exactly 50 orders, one answer per attempt, and **confirmed results equal to the orders**; a worker **killed between commit and ack** has its batch replayed as the same order, stock moved once. The claim alone under concurrency: **never oversells** (20 000 attempts against 1 000 units) and **never grants one buyer two units**. Redelivery, dead-lettering and failure handling against a real RabbitMQ; API routes; realtime delivery; the frontend's purchase-state rules | `pnpm test` |
+| End to end | 23 Playwright specs against the built app | `pnpm test:e2e` |
 | Stress | k6 scenarios, then the invariants checked in Postgres | `pnpm stress <scenario>` |
 
 CI runs the first two on every pull request — the unit suite twice, once in a non-UTC timezone, since a suite that only passes in UTC cannot catch code that depends on the local zone.
@@ -192,7 +192,7 @@ Playwright drives real browsers against a stack it starts itself (the API servin
 | `time` | one instant shown in Tokyo and St John's, each labelled; a browser clock two hours fast leaves the countdown right |
 | `rejection` | not yet open, ended, already held, `503`, `429` — each ends in a message |
 | `double-click` | exactly one attempt sent |
-| `stuck` | a purchase never sits on *Securing* for good: a rejection that never arrives settles at sellout, Buy waits for the socket, a rename neither carries an attempt over nor loses it |
+| `stuck` | a purchase never sits on *Securing* for good: a rejection that never arrives settles at sellout or at the end, including one that sold out while the socket was down; Buy waits for the socket; a rename neither carries an attempt over nor loses it; and a winner whose result is lost, and whose lookups are rate limited, still ends up holding their order |
 
 ### Stress tests
 
