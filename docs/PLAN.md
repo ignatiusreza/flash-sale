@@ -123,8 +123,13 @@ WITH input AS (
 locked AS (
   SELECT remaining FROM sales WHERE id = $1 FOR UPDATE
 ),
+eligible AS (                       -- each buyer once, and only if not yet holding one
+  SELECT user_id, row_number() OVER (ORDER BY first_ord) AS place
+  FROM (SELECT user_id, min(ord) AS first_ord FROM input GROUP BY user_id) firsts
+  WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.sale_id = $1 AND o.user_id = firsts.user_id)
+),
 candidate AS (
-  SELECT i.user_id FROM input i, locked l WHERE i.ord <= l.remaining
+  SELECT e.user_id FROM eligible e, locked l WHERE e.place <= l.remaining
 ),
 ins AS (
   INSERT INTO orders (sale_id, user_id)
@@ -140,7 +145,9 @@ RETURNING remaining, (SELECT array_agg(user_id) FROM ins) AS winners;
 Three properties, each load-bearing and each verified in §4.4:
 
 1. **It decrements by rows *actually inserted*, not by batch size.** This is what makes a redelivered batch a no-op: on redelivery every user already has an order, `ins` returns zero rows, and the decrement is zero. The obvious alternative — `remaining - array_length($2)` — would double-decrement on every redelivery and silently destroy stock. Since RabbitMQ delivery is at-least-once, this is not a hypothetical.
-2. **`ord <= remaining` preserves arrival order.** When a batch straddles sellout, the earliest arrivals win. The brief asks for fairness; this is where it is implemented.
+2. **Places go to buyers who can win, in arrival order.** When a batch straddles sellout, the earliest arrivals win. The brief asks for fairness; this is where it is implemented. Each buyer is ranked once, at their first entry, and only if they hold no order yet.
+
+   *Revised after review (issue #11).* The first version ranked every entry, `ord <= remaining`. A buyer who already held an order, or a second entry for the same buyer, then took a place but no stock, and someone behind them was told `sold_out` while units remained: with 2 left, `[dave, dave, erin]` granted dave, refused erin, and left 1. Those are exactly a redelivered batch, a double submit and a second tab. The existing-order check reads the statement's snapshot, so if a second worker commits while this one waits on the lock, a place can still go unused; the worker then claims again for anyone it would otherwise refuse while stock remains.
 3. **Duplicates inside one batch cost one unit, not several.** `ON CONFLICT DO NOTHING` tolerates the same user appearing twice in a single statement, and because the decrement follows the insert count, stock stays correct.
 
 `FOR UPDATE` is defence in depth. With one active consumer there is no concurrency to guard against, but it means the statement is still correct if a second worker is ever running — during a botched failover, say.
@@ -225,6 +232,9 @@ Four conclusions drive the rest of the design:
 | Same batch, by arrival order | first five win | ✅ `b001…b005` |
 | **Redelivery of a committed batch** | 0 granted, stock unchanged, no new orders | ✅ idempotent |
 | Same user three times in one batch | 1 granted, 1 unit consumed | ✅ |
+| Stock 2, `[dave, dave, erin]` | both granted, 0 remaining — the repeat takes no place | ✅ after #11 |
+| Stock 2, `[alice (holds one), bob, carol]` | bob and carol granted; alice told `already_purchased` | ✅ after #11 |
+| An order committed by a second worker while the claim waits on the lock | the unit it was ranked for goes to the next buyer, not unsold | ✅ after #11 |
 | Batch against stock 0 | 0 granted | ✅ |
 | Two batches straddling sellout | `orders = total_stock - remaining` | ✅ 50 orders, 0 remaining |
 

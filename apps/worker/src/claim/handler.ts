@@ -1,8 +1,17 @@
 import { saleStatusAt, type PurchaseResultEvent } from '@flash-sale/core';
 import type { PurchaseAttempt, PurchaseResultsMessage } from '@flash-sale/messaging';
 
-import { claimBatch, findExistingOrders } from './claim.js';
+import { claimBatch, findExistingOrders, type ClaimResult } from './claim.js';
 import type { Queryable } from '../db/pool.js';
+
+/**
+ * Rounds of claiming per batch. The claim ranks buyers against existing orders
+ * read from its statement's snapshot, taken before the lock is granted, so a
+ * second worker committing while it waits makes it rank a buyer who already
+ * holds one: that place goes unused and the buyer after it would be told sold
+ * out. Re-claiming for them fixes it; the bound only guards against a loop.
+ */
+const MAX_ROUNDS = 3;
 
 /**
  * Turns one batch of attempts into one batch of outcomes.
@@ -17,22 +26,30 @@ export async function handleBatch(
   saleId: string,
   attempts: readonly PurchaseAttempt[],
 ): Promise<PurchaseResultsMessage> {
-  const claim = await claimBatch(
-    db,
-    saleId,
-    attempts.map((a) => a.userId),
-  );
+  const granted = new Map<string, string>();
+  const existing = new Map<string, string>();
+  let waiting = [...new Set(attempts.map((a) => a.userId))];
+  let claim: ClaimResult | undefined;
 
-  const granted = new Map(claim.granted.map((g) => [g.userId, g.orderId]));
+  // One round with a single active consumer; another only when a buyer would
+  // be told sold out while the window is open and stock remains.
+  for (let round = 0; round < MAX_ROUNDS && waiting.length > 0; round++) {
+    claim = await claimBatch(db, saleId, waiting);
+    for (const g of claim.granted) granted.set(g.userId, g.orderId);
 
-  // Anyone not granted might already hold an order rather than have lost — the
-  // claim cannot tell those apart, since ON CONFLICT DO NOTHING grants nothing
-  // either way. One lookup for the whole batch settles it.
-  const ungranted = attempts.map((a) => a.userId).filter((id) => !granted.has(id));
-  const existing =
-    ungranted.length > 0
-      ? await findExistingOrders(db, saleId, ungranted)
-      : new Map<string, string>();
+    // Anyone not granted might already hold an order rather than have lost —
+    // the claim cannot tell those apart, since ON CONFLICT DO NOTHING grants
+    // nothing either way. One lookup for the whole batch settles it.
+    const ungranted = waiting.filter((id) => !granted.has(id));
+    if (ungranted.length > 0) {
+      for (const [userId, orderId] of await findExistingOrders(db, saleId, ungranted)) {
+        existing.set(userId, orderId);
+      }
+    }
+
+    waiting = claim.open && claim.remaining > 0 ? ungranted.filter((id) => !existing.has(id)) : [];
+  }
+  if (!claim) throw new Error('handleBatch called with an empty batch');
 
   const windowStatus = saleStatusAt({ startAt: claim.startAt, endAt: claim.endAt }, new Date());
 
