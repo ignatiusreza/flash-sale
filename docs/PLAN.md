@@ -407,9 +407,22 @@ Three rules keep this layer from becoming a liability:
 
 - **It tests the experience, never the invariant.** The oversell proof stays in integration and stress, where 20 000 attempts cost nothing. Twenty thousand browsers is not a test, it is a denial of service against your own CI. A race between five contexts for two units is legitimate E2E; a race between twenty thousand is not.
 - **No fixed sleeps, ever.** WebSocket arrival time is nondeterministic, so every assertion goes through Playwright's retrying `expect`. A flaky E2E suite is worse than none, because it trains people to re-run red builds.
-- **Each spec seeds its own sale.** A test-only reset endpoint behind `ENABLE_TEST_ENDPOINTS`, never enabled in a deployed environment, gives each spec a fresh sale with known stock and window. Tests that share mutable state across a queue and a worker will interfere in ways that look like real bugs.
+- **Each spec seeds its own sale.** A test-only reset endpoint, registered only when the API runs as `APP_ENV=e2e` and so never in a deployed environment, gives each spec a fresh sale with known stock and window. Tests that share mutable state across a queue and a worker will interfere in ways that look like real bugs.
 
 Playwright can also observe the socket directly — `page.on('websocket', ws => ws.on('framereceived', …))` — which is worth wiring into the fixtures as a diagnostic. When a UI assertion fails it immediately separates "the server never sent it" from "the client ignored it", and those have very different fixes. Socket.IO frames carry Engine.IO encoding, so the UI state stays the primary assertion and frames are for triage.
+
+**As built (phase 6).** All eight specs exist and pass, 65 of 65 across five repetitions. Decisions taken while building them:
+
+- **One sale, reset per spec, run serially.** The API serves a single configured sale, so "each spec seeds its own sale" means each spec resets it through the test endpoint, and specs cannot run in parallel. The reset refreshes the API's sale cache before answering; otherwise a spec sees the previous sale for up to a second.
+- **The queued state is held, not raced.** In real timing the result follows the `202` by milliseconds, so `purchase` holds the result frame at the socket (`page.routeWebSocket`) until the queued state has been asserted, and `reconnect` drops it on the first connection.
+- **`503` and `429` are substituted at the network.** The spec tests the UI's handling; producing a real `503` means saturating the queue, which belongs to stress (phase 7).
+- **The E2E stack runs the built app**, not the Vite dev server: the API serves the SPA on one origin, as it ships.
+
+The layer earned its place on its first run, against code that had passed every unit test and a browser walkthrough:
+
+- **`reconnect` failed.** The page looked up the user's order on arrival but not on reconnect, so a result lost with the socket left it on *queued* for an order that existed. It now re-syncs after every automatic reconnect — making §5's "a dropped socket is cosmetic" true rather than asserted.
+- **Every upcoming sale crashed the page.** The local-time label combined `dateStyle` with `timeZoneName`, which the `Intl` constructor rejects, so rendering threw and the page went blank. Every earlier check had used an open sale.
+- **A refresh mid-purchase forgot it.** Found by watching it rather than by a spec: with the worker held back, a reloaded page offered Buy again while its attempt sat in the queue, and never explained a later rejection, because the queue holds requests, not anything a page can look up. The page now remembers its pending attempt in `localStorage` (shared by the user's tabs, which already all receive their results), restores it on reload, and lets it go after two minutes. A restored attempt whose result was missed — the page was closed when it arrived — is settled by a fresh order lookup plus the sale: no order once the sale has sold out or ended means it failed. That derivation is confined to restored attempts, because for a live one the "sold out" push can arrive just before the result of the purchase that took the last unit. The `refresh` spec covers it.
 
 **Stress (k6).** Ramp to high concurrency over ~60 s with thresholds encoded as pass/fail, driving HTTP for attempts and holding WebSocket connections for results, so the measured latency is genuinely end-to-end rather than time-to-`202`. A teardown asserts the same invariants at realistic load. Results and their interpretation go into the README.
 

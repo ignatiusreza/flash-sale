@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { clockOffset, formatCountdown, remainingMs } from './clock.js';
+import { clockOffset, formatCountdown, formatLocal, remainingMs } from './clock.js';
 
 const SERVER = '2026-11-20T10:00:00.000Z';
 
@@ -53,5 +53,17 @@ describe('formatCountdown', () => {
   it('rounds down, so it never reaches zero early', () => {
     expect(formatCountdown(1_999)).toBe('00:01');
     expect(formatCountdown(0)).toBe('00:00');
+  });
+});
+
+describe('formatLocal', () => {
+  // It once combined `dateStyle` with `timeZoneName`, which the Intl
+  // constructor rejects; the page then blanked for every upcoming sale.
+  it('formats without throwing, labelled with the zone', () => {
+    expect(formatLocal(SERVER, 'Asia/Tokyo')).toContain('GMT+9');
+  });
+
+  it('renders the same instant as each zone’s own wall clock', () => {
+    expect(formatLocal(SERVER, 'Asia/Tokyo')).not.toEqual(formatLocal(SERVER, 'America/St_Johns'));
   });
 });

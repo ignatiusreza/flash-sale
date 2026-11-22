@@ -30,12 +30,21 @@ export function formatCountdown(ms: number): string {
 
 /**
  * Formats an instant in the viewer's own timezone and locale, labelled with the
- * zone so nobody has to guess which one the sale opens in (§9.1).
+ * zone so nobody has to guess which one the sale opens in (§9.1). `timeZone`
+ * is for tests; the page always uses the viewer's.
+ *
+ * Fields, not `dateStyle`/`timeStyle`: those cannot be combined with
+ * `timeZoneName`, and the constructor throws — which, during render, blanked
+ * the whole page for any sale not yet open.
  */
-export function formatLocal(iso: string): string {
+export function formatLocal(iso: string, timeZone?: string): string {
   return new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
     timeZoneName: 'short',
+    ...(timeZone ? { timeZone } : {}),
   }).format(new Date(iso));
 }

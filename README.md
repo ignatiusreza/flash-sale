@@ -4,7 +4,7 @@ A high-throughput flash sale backend: one product, limited stock, one item per u
 
 `docs/REQUIREMENT.md` is the brief. **`docs/PLAN.md` is the design**, including the trade-offs and the open questions. `docs/prototype/` holds the spikes that settled the measurable ones — each records how to reproduce its numbers.
 
-> **Status: phase 5 of 8.** The system works end to end — claim, queue, API, realtime and frontend. Remaining: E2E tests, stress tests and the write-up. See `docs/PLAN.md` §13.
+> **Status: phase 6 of 8.** The system works end to end — claim, queue, API, realtime and frontend — and a Playwright suite proves it from the browser. Remaining: stress tests and the write-up. See `docs/PLAN.md` §13.
 
 ## API
 
@@ -66,10 +66,25 @@ It assumes each service's stock local credentials, and either can be overridden 
 
 | Variable | Default |
 | --- | --- |
-| `DATABASE_URL` | `postgres://postgres@localhost:5432/flashsale_development` — the `postgres` superuser, no password |
+| `DATABASE_URL` | `postgres://postgres@localhost:5432` — the `postgres` superuser, no password; with no database named, the environment picks it (`flashsale_development`) |
 | `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` — RabbitMQ's default user |
 
 If one is not reachable, `pnpm dev` says which and stops, rather than hanging.
+
+### Environments
+
+`APP_ENV` says whose data a process works on, and each environment gets its own on every service — a database in Postgres, a queue and exchange in RabbitMQ — so they can share one Postgres and one broker without touching each other:
+
+| Run | `APP_ENV` | Database | Queue / exchange |
+| --- | --- | --- | --- |
+| `pnpm dev` | `development` | `flashsale_development` | `development.purchase.attempts` / `development.flash-sale.events` |
+| `pnpm test` | `test` | `flashsale_test` | a queue per test, deleted after it |
+| `pnpm test:e2e` | `e2e` | `flashsale_e2e` | `e2e.purchase.attempts` / `e2e.flash-sale.events` |
+| deployed | `production` (default) | whatever `DATABASE_URL` names | `purchase.attempts` / `flash-sale.events` |
+
+For the database, `DATABASE_URL` says where Postgres is and who connects; the environment picks the database name unless the URL names one itself, in which case it is used as it is. The dev, test and E2E runs apply that rule; a deployed API and worker take `DATABASE_URL` exactly as given.
+
+It is not `NODE_ENV`, which says how code runs — build mode, React's dev checks. The two vary independently: E2E runs production code against test data. RabbitMQ virtual hosts would be the more literal split, but creating one needs broker admin rights, while queues and exchanges are declared on first use.
 
 ### Using the Compose services instead
 
@@ -78,11 +93,13 @@ Without local services, Compose provides both — on non-default ports, so they 
 ```sh
 docker compose up -d --wait
 cat >> .env <<'EOF'
-DATABASE_URL=postgres://flashsale:flashsale@localhost:15432/flashsale
+DATABASE_URL=postgres://flashsale:flashsale@localhost:15432
 RABBITMQ_URL=amqp://flashsale:flashsale@localhost:15673
 EOF
 pnpm dev
 ```
+
+Leave the database name off the URL: each environment then picks its own (`flashsale_development` for `pnpm dev`, `flashsale_test` for `pnpm test`), so they never share one. A URL that does name a database is used as it is.
 
 To see the whole thing running, built and containerised, with nothing on the host but Docker:
 
@@ -100,6 +117,7 @@ There are only two application services, `api` and `worker`. The API serves the 
 | `PORT` | `3000` | API port |
 | `WEB_ROOT` | — | directory of the built SPA; unset, the process is a pure API |
 | `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
+| `APP_ENV` | `production` | whose data: names the RabbitMQ queue and exchange — see [Environments](#environments) |
 | `SEED_STOCK` | `100` | units in the seeded sale |
 | `SEED_DURATION_MINUTES` | `60` | how long it stays open |
 | `SEED_RESET` | — | `1` to recreate the sale and drop its orders |
@@ -154,6 +172,29 @@ Set **`TRUST_PROXY`** to the gateway's address or CIDR when you do. It decides w
 A hop count is **rejected at boot**: Fastify maps a numeric `trustProxy` to a function that trusts nothing, so accepting one would look configured while doing nothing.
 
 To serve the frontend from a CDN or bucket instead, leave `WEB_ROOT` unset and route `/` there. The image is the same.
+
+### End-to-end tests
+
+```sh
+pnpm exec playwright install chromium   # once
+pnpm test:e2e
+```
+
+Playwright starts its own stack and tears it down: it builds the app, then runs the API (serving the built SPA, as in production) on `:3100` and a worker, as `APP_ENV=e2e` — the same local services as `pnpm dev`, but its own database and queues (see [Environments](#environments)), so it runs happily beside a `pnpm dev`. It takes service locations from the shell only, never from `.env`: a `DATABASE_URL` there names your development database, and the suite's reset endpoint would wipe its orders.
+
+Each spec seeds its own sale through `POST /api/test/sale`, which exists only when the API runs as `APP_ENV=e2e` — not in development, whose data is your work, and never in production. Specs run one at a time, because there is one sale; there are no retries, because a flaky suite trains people to re-run red builds. When a spec fails, the Socket.IO frames it saw are attached to the report, which separates "the server never sent it" from "the page ignored it".
+
+| Spec | Proves |
+| --- | --- |
+| `purchase` | click → 202 → a visible *queued* state → the result over the socket → held. The result is held back at the socket so the queued state can be observed; it normally lasts milliseconds. |
+| `reconnect` | a result lost with a dropped socket is recovered by re-syncing through `GET /api/orders?userId=` after reconnecting |
+| `refresh` | a refresh while a purchase waits in the queue keeps it — still *queued*, Buy disabled — and the outcome still lands: the order, or *sold out* once stock runs out; an attempt pending past two minutes is let go |
+| `concurrency` | five buyers race for two units: two hold, three see *sold out* |
+| `presence` | the viewer count converges as people arrive and leave |
+| `lifecycle` | *upcoming → active → ended*, live, with no reload |
+| `time` | the same instant renders in each viewer's zone, labelled; a browser clock two hours fast leaves the countdown correct |
+| `rejection` | not yet open, ended, already held, `503` and `429` each end in a message — the last two substituted at the network, since producing a real `503` is the stress suite's job |
+| `double-click` | a double click sends exactly one attempt |
 
 ### Running the gates inside Docker
 
@@ -217,6 +258,7 @@ Editor configuration is split by necessity: `.zed/settings.json` and `.zed/tasks
 | `pnpm build`                | `tsc -b` across the project graph, then the web bundle.     |
 | `pnpm typecheck`            | Build graph, test files, and the web app.                   |
 | `pnpm test`                 | Vitest, against local services by default (see above).      |
+| `pnpm test:e2e`             | Playwright against the built stack (see below).             |
 | `pnpm lint` / `pnpm format` | ESLint / Prettier.                                          |
 | `pnpm licenses:check`       | Fails on any dependency licence outside the allowlist.      |
 | `pnpm clean`                | Removes build output.                                       |

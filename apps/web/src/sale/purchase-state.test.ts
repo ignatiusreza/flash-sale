@@ -5,10 +5,14 @@ import {
   applyOwnResponse,
   applyResponse,
   applyResult,
+  attemptOf,
   canPurchase,
   idle,
   isBusy,
   isTerminal,
+  livePending,
+  PENDING_TTL_MS,
+  restoredOutcome,
 } from './purchase-state.js';
 
 const queued = { status: 'queued', attemptId: 'ours' } as const;
@@ -175,5 +179,55 @@ describe('canPurchase', () => {
     expect(canPurchase({ status: 'held', orderId: 'o1' }, 'alice', open)).toBe(false);
     expect(canPurchase({ status: 'busy' }, 'alice', open)).toBe(true);
     expect(canPurchase({ status: 'failed', message: 'x' }, 'alice', open)).toBe(true);
+  });
+});
+
+describe('attemptOf', () => {
+  it('is the attempt being waited on, restored or not', () => {
+    expect(attemptOf(queued)).toBe('ours');
+    expect(attemptOf({ ...queued, restored: true })).toBe('ours');
+  });
+
+  // Before the 202 nobody knows it; once decided, nothing is waited on.
+  it('is nothing before the attempt is queued or after it is decided', () => {
+    expect(attemptOf({ status: 'submitting' })).toBeUndefined();
+    expect(attemptOf({ status: 'held', orderId: 'o1' })).toBeUndefined();
+    expect(attemptOf(idle)).toBeUndefined();
+  });
+});
+
+describe('livePending', () => {
+  const pending = { attemptId: 'ours', since: 1_000_000 };
+
+  it('trusts an attempt younger than the limit', () => {
+    expect(livePending(pending, pending.since + PENDING_TTL_MS - 1)).toEqual(pending);
+  });
+
+  // Its result was missed and the lookup found no order: offer Buy again.
+  it('drops one that has outlived it', () => {
+    expect(livePending(pending, pending.since + PENDING_TTL_MS)).toBeUndefined();
+  });
+
+  it('has nothing to restore when nothing was pending', () => {
+    expect(livePending(undefined, pending.since)).toBeUndefined();
+  });
+});
+
+describe('restoredOutcome', () => {
+  it('fails an attempt once the sale has ended', () => {
+    expect(restoredOutcome({ status: 'ended' })).toEqual({ status: 'rejected', reason: 'ended' });
+  });
+
+  it('fails an attempt once the sale has sold out', () => {
+    expect(restoredOutcome({ status: 'active', availability: 'sold_out' })).toEqual({
+      status: 'rejected',
+      reason: 'sold_out',
+    });
+  });
+
+  it('leaves it undecided while it could still succeed', () => {
+    expect(restoredOutcome({ status: 'active', availability: 'low' })).toBeUndefined();
+    expect(restoredOutcome({ status: 'upcoming' })).toBeUndefined();
+    expect(restoredOutcome(undefined)).toBeUndefined();
   });
 });

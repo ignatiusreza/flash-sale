@@ -21,6 +21,8 @@ export interface ServerDeps {
   readonly docs?: boolean;
   /** Directory of the built SPA. Unset, this serves the API alone. */
   readonly webRoot?: string;
+  /** Registers the E2E-only reset endpoint; see `config.ts`. Off by default. */
+  readonly enableTestEndpoints?: boolean;
   /** Whether `X-Forwarded-For` may be believed; see `config.ts`. */
   readonly trustProxy?: boolean | string[];
 }

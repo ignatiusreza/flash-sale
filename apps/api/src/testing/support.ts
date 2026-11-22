@@ -32,6 +32,10 @@ export interface TestServerOptions {
   /** Directory of a built SPA. Omitted, the server is API-only. */
   webRoot?: string;
   trustProxy?: boolean | string[];
+  /** Replaces the stub built from `view`, for tests that need more of the cache. */
+  saleCache?: SaleCache;
+  enableTestEndpoints?: boolean;
+  docs?: boolean;
 }
 
 export interface TestServer {
@@ -50,12 +54,14 @@ export async function createTestServer(options: TestServerOptions = {}): Promise
 
   const app = await buildServer({
     pool: options.pool ?? ({} as pg.Pool),
-    saleCache: cacheOf('view' in options ? options.view : activeView),
+    saleCache: options.saleCache ?? cacheOf('view' in options ? options.view : activeView),
     saleId: 'flash',
     rateLimitPerMinute: options.rateLimitPerMinute ?? 1000,
     publish,
     ...(options.webRoot ? { webRoot: options.webRoot } : {}),
     ...(options.trustProxy === undefined ? {} : { trustProxy: options.trustProxy }),
+    ...(options.enableTestEndpoints ? { enableTestEndpoints: true } : {}),
+    ...(options.docs === undefined ? {} : { docs: options.docs }),
   });
 
   return { app, published };

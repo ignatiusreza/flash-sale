@@ -1,24 +1,35 @@
-import type { PurchaseResultEvent } from '@flash-sale/core';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import type { Availability, PurchaseResultEvent, SaleStatus } from '@flash-sale/core';
+import { useCallback, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 
 import { useSocketEvent } from '../realtime/useSocketEvent.js';
-import { findOrder, submitPurchase } from './api.js';
-import { applyOwnResponse, applyResult, idle, type PurchaseState } from './purchase-state.js';
+import { submitPurchase } from './api.js';
+import {
+  applyOwnResponse,
+  applyResult,
+  attemptOf,
+  idle,
+  type PurchaseState,
+} from './purchase-state.js';
+import { useOrderSync } from './useOrderSync.js';
+import { usePendingAttempt } from './usePendingAttempt.js';
+
+type Sale = { readonly status: SaleStatus; readonly availability?: Availability } | undefined;
 
 /**
  * Where this user's purchasing stands, and the action that starts it.
  *
- * The state has three sources that must agree: the response to our own
- * attempt, results pushed over the socket, and an order found on arrival.
+ * The state has four sources that must agree: the response to our own
+ * attempt, results pushed over the socket, an order found by lookup
+ * (`useOrderSync`), and an attempt left pending by an earlier page
+ * (`usePendingAttempt`).
  */
 export function usePurchase(
   userId: string,
   socket: Socket,
+  sale: Sale,
 ): { purchaseState: PurchaseState; purchase: () => Promise<void> } {
   const [purchaseState, setPurchaseState] = useState<PurchaseState>(idle);
-  // Refs, not state: they decide how results are read, never what renders.
-  const attemptRef = useRef<string | undefined>(undefined);
   // Results that arrive while our POST is in flight, before its 202 tells us
   // which attempt is ours (see `applyOwnResponse`). Undefined when idle.
   const arrivedEarlyRef = useRef<PurchaseResultEvent[] | undefined>(undefined);
@@ -28,24 +39,11 @@ export function usePurchase(
   useSocketEvent<PurchaseResultEvent>(socket, 'purchase:result', (result) => {
     // Only while `purchase()` is waiting on its POST; it reads these back.
     arrivedEarlyRef.current?.push(result);
-    setPurchaseState((current) => applyResult(current, result, attemptRef.current));
+    setPurchaseState((current) => applyResult(current, result, attemptOf(current)));
   });
 
-  // On arrival, ask whether this user already holds an order. This is the
-  // reconnect source of truth: without it a returning visitor sees a Buy
-  // button for something they already own.
-  useEffect(() => {
-    if (!userId) return;
-    let cancelled = false;
-
-    void findOrder(userId).then((orderId) => {
-      if (!cancelled && orderId) setPurchaseState({ status: 'held', orderId });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [userId]);
+  useOrderSync(userId, socket, (orderId) => setPurchaseState({ status: 'held', orderId }));
+  usePendingAttempt(userId, purchaseState, sale, setPurchaseState);
 
   const purchase = useCallback(async () => {
     // Start collecting: the socket handler appends to this while we wait.
@@ -57,7 +55,6 @@ export function usePurchase(
     // Stop collecting, and take what the socket delivered in the meantime.
     const arrivedEarly = arrivedEarlyRef.current ?? [];
     arrivedEarlyRef.current = undefined;
-    attemptRef.current = response.status === 'queued' ? response.attemptId : undefined;
     setPurchaseState((current) => applyOwnResponse(current, response, arrivedEarly));
   }, [userId]);
 

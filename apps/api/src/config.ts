@@ -3,6 +3,14 @@ import { z } from 'zod';
 const schema = z.object({
   DATABASE_URL: z.string().min(1),
   RABBITMQ_URL: z.string().min(1),
+  /**
+   * Which environment's data this process works on: `development`, `test`,
+   * `e2e` or `production`. Separate from NODE_ENV, which says how the code
+   * runs — E2E runs production code against test data. It prefixes the queue
+   * and exchange names (`topologyNames` in @flash-sale/messaging); production
+   * keeps the plain ones.
+   */
+  APP_ENV: z.string().default('production'),
   SALE_ID: z.string().min(1).default('flash'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
@@ -47,6 +55,15 @@ const schema = z.object({
 });
 
 export type Config = z.infer<typeof schema>;
+
+/**
+ * Whether to register `POST /api/test/sale`, which wipes the sale's orders and
+ * reseeds it for the E2E suite. Only in the E2E environment: not development,
+ * whose data is someone's work, and never production.
+ */
+export function testEndpointsEnabled(config: Pick<Config, 'APP_ENV'>): boolean {
+  return config.APP_ENV === 'e2e';
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.safeParse(env);

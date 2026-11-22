@@ -10,7 +10,15 @@ import type { Availability, PurchaseResultEvent, SaleStatus } from '@flash-sale/
 export type PurchaseState =
   | { readonly status: 'idle' }
   | { readonly status: 'submitting' }
-  | { readonly status: 'queued'; readonly attemptId: string }
+  | {
+      readonly status: 'queued';
+      readonly attemptId: string;
+      /**
+       * Restored after a refresh rather than sent by this page: its result
+       * may have been missed, so only it may be settled from the sale.
+       */
+      readonly restored?: true;
+    }
   | { readonly status: 'held'; readonly orderId: string }
   | { readonly status: 'rejected'; readonly reason: 'sold_out' | 'not_started' | 'ended' }
   | { readonly status: 'busy' }
@@ -30,6 +38,15 @@ export function isBusy(state: PurchaseState): boolean {
 }
 
 /**
+ * The attempt this page is waiting on, whose rejection would be ours. Only
+ * while queued: before the 202 nobody knows it (`applyOwnResponse` covers
+ * that window), and once decided there is nothing left to wait for.
+ */
+export function attemptOf(state: PurchaseState): string | undefined {
+  return state.status === 'queued' ? state.attemptId : undefined;
+}
+
+/**
  * Whether a purchase can be started: someone to purchase for, a sale open
  * with stock, and nothing in flight or already settled for this user.
  */
@@ -45,6 +62,52 @@ export function canPurchase(
     !isBusy(state) &&
     !isTerminal(state)
   );
+}
+
+/**
+ * An attempt this browser sent and has not yet seen decided, remembered so a
+ * refresh does not forget it: the queue holds requests, not anything the page
+ * can look up, so without this a reloaded page offers Buy again mid-purchase.
+ */
+export interface PendingAttempt {
+  readonly attemptId: string;
+  /** Epoch milliseconds, when the attempt was accepted. */
+  readonly since: number;
+}
+
+/**
+ * How long a remembered attempt is trusted. Real waits are seconds; past this,
+ * its result was missed — the page was closed when it arrived — and the order
+ * lookup has already said it did not succeed.
+ */
+export const PENDING_TTL_MS = 2 * 60_000;
+
+/** The remembered attempt, if it is still young enough to wait for. */
+export function livePending(
+  pending: PendingAttempt | undefined,
+  now: number,
+): PendingAttempt | undefined {
+  return pending && now - pending.since < PENDING_TTL_MS ? pending : undefined;
+}
+
+/**
+ * The outcome a restored attempt must have had, given that the user holds no
+ * order: once the sale has ended or sold out it can no longer succeed.
+ * Undefined while it still could.
+ *
+ * Only for attempts restored after a refresh, whose result may have been
+ * missed, and only after a lookup has found no order. A live attempt gets its
+ * result over the socket, and the "sold out" push can arrive just before the
+ * result of the purchase that took the last unit.
+ */
+export function restoredOutcome(
+  sale: { readonly status: SaleStatus; readonly availability?: Availability } | undefined,
+): PurchaseState | undefined {
+  if (sale?.status === 'ended') return { status: 'rejected', reason: 'ended' };
+  if (sale?.status === 'active' && sale.availability === 'sold_out') {
+    return { status: 'rejected', reason: 'sold_out' };
+  }
+  return undefined;
 }
 
 /**
