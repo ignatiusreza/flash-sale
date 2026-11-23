@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { ROOT } from '../lib/stack.mjs';
+import { STATS_INTERVAL_MS } from './timing.mjs';
 import { rssOf, until, untilOk } from './wait.mjs';
 
 const PORTS = [3200, 3201];
@@ -54,6 +55,8 @@ export async function startStack(stress, scenario) {
   const shared = {
     ...env,
     ...(scenario.queueMax ? { QUEUE_MAX_LENGTH: String(scenario.queueMax) } : {}),
+    // Each process prints where its time goes; the report reads it back.
+    STATS_INTERVAL_MS: String(STATS_INTERVAL_MS),
   };
   const sameGroup = { ownGroup: false };
   const startWorker = () =>

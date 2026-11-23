@@ -1,4 +1,5 @@
 import type { publishAttempt } from '@flash-sale/messaging';
+import type { FastifyBaseLogger } from 'fastify';
 import type pg from 'pg';
 
 import type { SaleCache } from './sale/cache.js';
@@ -18,7 +19,8 @@ export interface ServerDeps {
   readonly lookupLimitPerMinute?: number;
   /** Publishes an attempt and resolves only once the broker confirms it. */
   readonly publish: (attempt: Parameters<typeof publishAttempt>[2]) => Promise<void>;
-  readonly logger?: boolean;
+  /** The process's logger (`createLogger`); omitted, the server logs nothing. */
+  readonly logger?: FastifyBaseLogger;
   /** Serve the OpenAPI document and its UI. On by default. */
   readonly docs?: boolean;
   /** Directory of the built SPA. Unset, this serves the API alone. */

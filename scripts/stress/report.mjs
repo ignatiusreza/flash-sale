@@ -15,7 +15,7 @@ const PHASE_ORDER = ['steady', 'rush', 'claims', 'probe'];
  * Latency is per phase, never pooled: a quiet phase's p99 is not the rush's,
  * and an average across a gap means nothing.
  */
-export function report(say, summary, { notes, verdicts }) {
+export function report(say, summary, { notes, verdicts, timing = {} }) {
   // Between groups, a rule in the same gutter as every other line.
   const fence = () => say('─'.repeat(72));
   const m = summary.metrics;
@@ -76,6 +76,30 @@ export function report(say, summary, { notes, verdicts }) {
         `  result heard   ${latency(`result_latency{scenario:${phase}}`)}  ` +
           `(${n(`results_timed{scenario:${phase}}`)} timed)`,
       );
+    }
+  }
+
+  // Where each process's time went, from the stats it printed (timing.mjs).
+  const series = [
+    ['eventLoop', 'event-loop lag', 'ms'],
+    ['publishConfirm', 'publish confirm', 'ms'],
+    ['queueWait', 'waited in queue', 'ms'],
+    ['batchSize', 'batch size', ''],
+    ['claim', 'claim', 'ms'],
+  ];
+  const stat = (value, unit) => `${value.toFixed(unit ? 1 : 0)}${unit ? ' ms' : ''}`.padStart(10);
+  if (Object.keys(timing).length > 0) {
+    fence();
+    say('where the time went                p50       p99       max');
+    for (const [name, line] of Object.entries(timing)) {
+      for (const [key, label, unit] of series) {
+        const value = line[key];
+        if (!value) continue;
+        say(
+          `  ${name.padEnd(8)}${label.padEnd(18)}` +
+            `${stat(value.p50, unit)}${stat(value.p99, unit)}${stat(value.max, unit)}`,
+        );
+      }
     }
   }
 

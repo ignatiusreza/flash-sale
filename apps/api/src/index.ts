@@ -7,6 +7,7 @@ import {
   subscribeToEvents,
   type PurchaseResultsMessage,
 } from '@flash-sale/messaging';
+import { createLogger, startStats } from '@flash-sale/observability';
 import pg from 'pg';
 
 import { loadConfig, testEndpointsEnabled } from './config.js';
@@ -16,6 +17,11 @@ import { buildServer } from './server.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const { logger, flush } = createLogger({
+    name: 'api',
+    level: config.LOG_LEVEL,
+    pretty: config.APP_ENV === 'development',
+  });
 
   // Session timezone pinned on the connection, not inherited (docs/PLAN.md §9.1).
   // The connect timeout matters as much: without it an unreachable database
@@ -27,7 +33,7 @@ async function main(): Promise<void> {
   });
   // See createPool in apps/worker: an idle client's error is not fatal here
   // either. The sale cache keeps its last snapshot and readiness reports it.
-  pool.on('error', (error) => console.error(`database: ${error.message}`));
+  pool.on('error', (error) => logger.error(`database: ${error.message}`));
 
   const saleCache = new SaleCache(pool, config.SALE_ID, config.SALE_REFRESH_MS);
   await saleCache.start();
@@ -42,9 +48,12 @@ async function main(): Promise<void> {
   // results, so it exits and is restarted; clients reconnect to another
   // instance meanwhile and re-sync their orders.
   const releaseBroker = onBrokerLost(connection, [channel], (reason) => {
-    console.error(`${reason}; exiting for a restart`);
+    logger.error(`${reason}; exiting for a restart`);
+    flush();
     process.exit(1);
   });
+
+  const stats = config.STATS_INTERVAL_MS ? startStats('api', config.STATS_INTERVAL_MS) : undefined;
 
   const app = await buildServer({
     pool,
@@ -52,8 +61,18 @@ async function main(): Promise<void> {
     saleId: config.SALE_ID,
     rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
     lookupLimitPerMinute: config.ORDER_LOOKUP_LIMIT_PER_MINUTE,
-    publish: (attempt) => publishAttempt(channel, queue, attempt),
-    logger: true,
+    publish: stats
+      ? async (attempt) => {
+          // The broker's confirm: how much of a POST's time is waiting on it.
+          const started = performance.now();
+          try {
+            await publishAttempt(channel, queue, attempt);
+          } finally {
+            stats.record('publishConfirm', performance.now() - started);
+          }
+        }
+      : (attempt) => publishAttempt(channel, queue, attempt),
+    logger,
     ...(config.WEB_ROOT ? { webRoot: config.WEB_ROOT } : {}),
     trustProxy: config.TRUST_PROXY,
     enableTestEndpoints: testEndpointsEnabled(config),
@@ -96,6 +115,7 @@ async function main(): Promise<void> {
     await channel.close();
     await connection.close();
     await pool.end();
+    flush();
   };
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());

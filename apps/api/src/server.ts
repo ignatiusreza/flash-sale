@@ -22,7 +22,9 @@ export type { ServerDeps } from './deps.js';
  */
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: deps.logger ?? false,
+    // The process's own logger, which writes off the request path; none in
+    // tests, which build servers by the dozen.
+    ...(deps.logger ? { loggerInstance: deps.logger } : { logger: false }),
     // Decides whether `request.ip` — which is what the rate limiter keys on —
     // comes from the socket or from `X-Forwarded-For`. Wrong in either
     // direction and the limit silently stops working: left off behind a proxy
