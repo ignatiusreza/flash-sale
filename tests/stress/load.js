@@ -1,6 +1,8 @@
 import exec from 'k6/execution';
 
 import { addressFor, buy, postAttempt, recordAttempt } from './lib/buyer.js';
+import { RAMP_S, rampThenHold } from './lib/plan.js';
+import { BASES, HOLD_S, PROBE_RATE, RATE } from './lib/settings.js';
 
 /**
  * What a buyer waits while the system is genuinely busy (issue #17).
@@ -15,11 +17,6 @@ import { addressFor, buy, postAttempt, recordAttempt } from './lib/buyer.js';
  * - `probe`: buyers on the socket, timed from POST to result, throughout the
  *   hold — the wait while the worker is claiming at that rate.
  */
-const BASES = __ENV.BASE_URLS.split(',');
-const RATE = Number(__ENV.RATE || 10_000);
-const HOLD_S = Number(__ENV.HOLD_S || 20);
-const PROBE_RATE = Number(__ENV.PROBE_RATE || 200);
-
 export const options = {
   scenarios: {
     claims: {
@@ -27,17 +24,14 @@ export const options = {
       exec: 'claims',
       startRate: 1_000,
       timeUnit: '1s',
-      stages: [
-        { target: RATE, duration: '5s' },
-        { target: RATE, duration: `${HOLD_S}s` },
-      ],
+      stages: rampThenHold(RATE, HOLD_S),
       preAllocatedVUs: 2_000,
       maxVUs: 5_000,
     },
     probe: {
       executor: 'constant-arrival-rate',
       exec: 'probe',
-      startTime: '5s',
+      startTime: `${RAMP_S}s`,
       rate: PROBE_RATE,
       timeUnit: '1s',
       duration: `${HOLD_S}s`,
