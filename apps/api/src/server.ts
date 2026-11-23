@@ -36,6 +36,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     // is a schema elsewhere. `routes/orders.test.ts` fails without it.
     ajv: { customOptions: { removeAdditional: false } },
   });
+  // Set after creation, not as logger options, which would change the
+  // instance's inferred types. Each request's logger is made later, from this.
+  if (deps.logger && deps.loggerLevel) app.log.level = deps.loggerLevel;
 
   // `global: false`: only creating an order is limited, and it opts in
   // itself. `/api/sale` is polled by every open tab by design, and limiting

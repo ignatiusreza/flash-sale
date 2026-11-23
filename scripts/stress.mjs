@@ -18,6 +18,7 @@ import { ROOT, supervisor } from './lib/stack.mjs';
 import { thresholdVerdicts } from './stress/checks.mjs';
 import { startStack } from './stress/harness.mjs';
 import { runK6 } from './stress/k6.mjs';
+import { readTiming } from './stress/timing.mjs';
 import { report } from './stress/report.mjs';
 import { scenarioNamed } from './stress/scenarios.mjs';
 
@@ -40,7 +41,8 @@ const { notes, verdicts } = await scenario.check({
   say: stress.say,
 });
 const all = [...thresholdVerdicts(summary), ...verdicts];
-report(stress.say, summary, { notes, verdicts: all });
+const timing = await readTiming(logDir, ['api0', 'api1', 'worker']);
+report(stress.say, summary, { notes, verdicts: all, timing });
 
 await stack.close();
 await stress.shutdown(all.every((verdict) => verdict.pass) ? 0 : 1);

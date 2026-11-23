@@ -24,6 +24,17 @@ const schema = z.object({
   SALE_REFRESH_MS: z.coerce.number().int().positive().default(1000),
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(60),
   /**
+   * The log level. At `info`, Fastify logs every request — two lines each,
+   * written synchronously, on the hot path; `warn` keeps errors and warnings
+   * only.
+   */
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  /**
+   * Prints where this process's time goes every so many milliseconds, for the
+   * stress harness (`stats.ts`). Unset, nothing is measured.
+   */
+  STATS_INTERVAL_MS: z.coerce.number().int().positive().optional(),
+  /**
    * Per address, for `GET /api/orders`. Higher than purchases: a client looks
    * itself up on every connect, and a reconnect or a refresh is legitimate.
    * It is there so one client cannot turn the lookup into load on the database

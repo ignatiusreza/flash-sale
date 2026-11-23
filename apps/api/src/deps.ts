@@ -19,6 +19,8 @@ export interface ServerDeps {
   /** Publishes an attempt and resolves only once the broker confirms it. */
   readonly publish: (attempt: Parameters<typeof publishAttempt>[2]) => Promise<void>;
   readonly logger?: boolean;
+  /** Pino's level when `logger` is on; `info` logs every request. */
+  readonly loggerLevel?: string;
   /** Serve the OpenAPI document and its UI. On by default. */
   readonly docs?: boolean;
   /** Directory of the built SPA. Unset, this serves the API alone. */

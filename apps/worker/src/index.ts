@@ -8,6 +8,7 @@ import {
 } from '@flash-sale/messaging';
 
 import { createPool } from './db/pool.js';
+import { startStats } from './stats.js';
 import { isBadAttemptData } from './claim/failures.js';
 import { handleBatch } from './claim/handler.js';
 import { migrate } from './db/migrate.js';
@@ -44,13 +45,25 @@ async function main(): Promise<void> {
   });
 
   const batchMax = Number(process.env.CLAIM_BATCH_MAX) || undefined;
+  // Where a batch's time goes, for the stress harness: see stats.ts.
+  const statsIntervalMs = Number(process.env.STATS_INTERVAL_MS) || undefined;
+  const stats = statsIntervalMs ? startStats('worker', statsIntervalMs) : undefined;
   const consumer = await startBatchConsumer({
     channel,
     queue,
     ...(batchMax ? { batchMax } : {}),
     isPermanent: isBadAttemptData,
     handle: async (attempts) => {
+      const started = performance.now();
+      if (stats) {
+        // How long each attempt sat in the queue before its batch began.
+        const now = Date.now();
+        for (const attempt of attempts)
+          stats.record('queueWait', now - Date.parse(attempt.requestedAt));
+        stats.record('batchSize', attempts.length);
+      }
       const message = await handleBatch(pool, saleId, attempts);
+      stats?.record('claim', performance.now() - started);
       // After the commit, never before: see startBatchConsumer.
       publishResults(channel, exchange, ROUTING_KEY_RESULTS, message);
     },

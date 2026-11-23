@@ -13,6 +13,7 @@ import { loadConfig, testEndpointsEnabled } from './config.js';
 import { createGateway } from './realtime/gateway.js';
 import { SaleCache } from './sale/cache.js';
 import { buildServer } from './server.js';
+import { startStats } from './stats.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -46,14 +47,27 @@ async function main(): Promise<void> {
     process.exit(1);
   });
 
+  const stats = config.STATS_INTERVAL_MS ? startStats('api', config.STATS_INTERVAL_MS) : undefined;
+
   const app = await buildServer({
     pool,
     saleCache,
     saleId: config.SALE_ID,
     rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
     lookupLimitPerMinute: config.ORDER_LOOKUP_LIMIT_PER_MINUTE,
-    publish: (attempt) => publishAttempt(channel, queue, attempt),
+    publish: stats
+      ? async (attempt) => {
+          // The broker's confirm: how much of a POST's time is waiting on it.
+          const started = performance.now();
+          try {
+            await publishAttempt(channel, queue, attempt);
+          } finally {
+            stats.record('publishConfirm', performance.now() - started);
+          }
+        }
+      : (attempt) => publishAttempt(channel, queue, attempt),
     logger: true,
+    loggerLevel: config.LOG_LEVEL,
     ...(config.WEB_ROOT ? { webRoot: config.WEB_ROOT } : {}),
     trustProxy: config.TRUST_PROXY,
     enableTestEndpoints: testEndpointsEnabled(config),
