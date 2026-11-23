@@ -4,7 +4,14 @@
  * long-running processes so that one dying takes the rest down with it.
  */
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeSync,
+} from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,22 +58,64 @@ function portFree(port) {
  * A supervisor that reports as `name`. One per process: it owns the children
  * it starts and the shutdown that stops them.
  */
-export function supervisor(name) {
+/**
+ * `logDir`, if given, sends every child's output to a file of its own there —
+ * `<name>.log` for a long-running process, `setup.log` for the steps `run`
+ * takes unless told otherwise — instead of to the terminal, which is left to
+ * the supervisor's own lines.
+ */
+export function supervisor(name, { logDir } = {}) {
   const children = [];
+  const cleanups = [];
   let shuttingDown = false;
+  if (logDir) mkdirSync(logDir, { recursive: true });
 
-  /** Runs a setup step to completion, with the step's own output inherited. */
-  function run(command, args, env = {}) {
+  const logs = new Map();
+  /** The file a child writes to, opened afresh the first time in a run. */
+  function logFile(logName) {
+    const file = path.join(logDir, `${logName}.log`);
+    if (!logs.has(file)) logs.set(file, openSync(file, 'w'));
+    return { file, fd: logs.get(file) };
+  }
+  const relative = (file) => path.relative(ROOT, file);
+
+  /**
+   * The last lines a log's process wrote, so a failure can be read where it is
+   * reported — without the `$ command` lines `run` heads each step with.
+   */
+  function tail(file, lines = 20) {
+    return readFileSync(file, 'utf8')
+      .trimEnd()
+      .split('\n')
+      .filter((line) => !line.startsWith('$ '))
+      .slice(-lines);
+  }
+
+  /**
+   * Runs a setup step to completion: its output inherited, or with `logDir`
+   * appended to `<logAs>.log` — and the end of that shown if the step fails.
+   * Resolves the exit code; codes in `answers` are results to read, not
+   * failures, so they resolve too and show nothing.
+   */
+  function run(command, args, env = {}, { logAs = 'setup', answers = [0] } = {}) {
+    const log = logDir ? logFile(logAs) : undefined;
+    if (log) writeSync(log.fd, `$ ${command} ${args.join(' ')}\n`);
+
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: ROOT,
-        stdio: 'inherit',
+        stdio: log ? ['ignore', log.fd, log.fd] : 'inherit',
         env: { ...process.env, ...env },
       });
       child.on('error', reject);
-      child.on('exit', (code) =>
-        code === 0 ? resolve() : reject(new Error(`${command} exited with ${code}`)),
-      );
+      child.on('exit', (code) => {
+        if (answers.includes(code)) return resolve(code);
+        if (log) {
+          say(name, `${command} exited with ${code}; the end of ${relative(log.file)}:`);
+          for (const line of tail(log.file)) say(name, `  ${line}`);
+        }
+        reject(new Error(`${command} exited with ${code}`));
+      });
     });
   }
 
@@ -148,27 +197,45 @@ export function supervisor(name) {
    * SIGKILLed and never get to signal anything.
    */
   function start(childName, command, args, env = {}, { ownGroup = true } = {}) {
+    const log = logDir ? logFile(childName) : undefined;
     const child = spawn(command, args, {
       cwd: ROOT,
-      env: { ...process.env, ...env, FORCE_COLOR: '1' },
+      // Colour only for a terminal: in a file it is escape codes.
+      env: { ...process.env, ...env, ...(log ? {} : { FORCE_COLOR: '1' }) },
       detached: ownGroup,
     });
     children.push(child);
 
-    for (const stream of [child.stdout, child.stderr]) {
-      let buffered = '';
-      stream.on('data', (chunk) => {
-        buffered += chunk;
-        const lines = buffered.split('\n');
-        buffered = lines.pop() ?? '';
-        for (const line of lines) say(childName, line);
-      });
+    // To a file, the child still writes into a pipe, and its bytes are copied
+    // across as they come. Handing it the file itself slowed the API under
+    // load: its logger writes synchronously, and a quiet stress phase's p99
+    // went from 37 ms to 185–494 ms.
+    const out = log ? createWriteStream('', { fd: log.fd, autoClose: false }) : undefined;
+    if (out) {
+      child.stdout.pipe(out, { end: false });
+      child.stderr.pipe(out, { end: false });
+    } else {
+      for (const stream of [child.stdout, child.stderr]) {
+        let buffered = '';
+        stream.on('data', (chunk) => {
+          buffered += chunk;
+          const lines = buffered.split('\n');
+          buffered = lines.pop() ?? '';
+          for (const line of lines) say(childName, line);
+        });
+      }
     }
 
     child.on('exit', (code) => {
       if (shuttingDown) return;
       say(name, `${childName} exited (${code}) — shutting the rest down`);
-      void shutdown(code ?? 1);
+      if (!out) return void shutdown(code ?? 1);
+      // Once what it wrote last has reached the file.
+      out.write('', () => {
+        say(name, `the end of ${relative(log.file)}:`);
+        for (const line of tail(log.file)) say(name, `  ${line}`);
+        void shutdown(code ?? 1);
+      });
     });
 
     return child;
@@ -189,9 +256,18 @@ export function supervisor(name) {
     }
   }
 
+  /**
+   * Something else to undo on the way out, however the run ends — for what
+   * outlives a killed child, like a container its `docker run` started.
+   */
+  function onShutdown(cleanup) {
+    cleanups.push(cleanup);
+  }
+
   async function shutdown(code) {
     if (shuttingDown) return;
     shuttingDown = true;
+    await Promise.allSettled(cleanups.map((cleanup) => cleanup()));
     for (const child of children) signalGroup(child, 'SIGTERM');
 
     // Give them a moment to close connections, then stop waiting.
@@ -212,5 +288,13 @@ export function supervisor(name) {
     });
   }
 
-  return { say: (line) => say(name, line), run, resolveServices, checkPorts, start, shutdown };
+  return {
+    say: (line) => say(name, line),
+    run,
+    resolveServices,
+    checkPorts,
+    start,
+    onShutdown,
+    shutdown,
+  };
 }

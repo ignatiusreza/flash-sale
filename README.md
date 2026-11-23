@@ -203,6 +203,8 @@ pnpm stress load        # a buyer's wait while every attempt is a real claim
 pnpm stress capacity    # exploratory: the ceiling with every attempt queued
 ```
 
+Every scenario takes the same five settings, overridable from the environment: `STRESS_RATE` (the headline arrival rate), `STRESS_HOLD_S` (how long it is held), `STRESS_PROBE_RATE` (buyers on the socket per second, timed), `STRESS_STOCK` and `STRESS_QUEUE_MAX` — for example `STRESS_RATE=5000 pnpm stress load`. What each means per scenario, and its defaults, are in `scripts/stress/scenarios.mjs`.
+
 Each run builds the app and starts its own stack with **two API instances** — a buyer's socket on one, their `POST` on the other, so every result crosses instances. [k6](https://k6.io) drives the load from Docker, standing in for many clients, each with its own address so the rate limiter sees them as distinct. Afterwards the run checks the invariants **in Postgres** and prints `PASS`/`FAIL` for each, because a load test that only reports throughput proves nothing. Stress is not in CI: sustained load on a shared runner is noise.
 
 **Expected outcome** — every correctness line `PASS`. Measured on one laptop (Ryzen 5 7640U, 12 threads, 30 GB) running k6, both APIs, the worker, Postgres and RabbitMQ together. `sale` runs two phases: `steady` (300 buyers/s on the socket) and then `rush` (HTTP only, ramped to 10 000/s and held 20 s, a quarter of it repeat buyers). `load` holds a rate of attempts against stock that never sells out — every one a real claim — while `probe` buyers on the socket are timed throughout. Each phase is reported on its own, with how many results it timed; none is pooled with another.

@@ -1,15 +1,17 @@
 import exec from 'k6/execution';
 
 import { addressFor, buy, postAttempt, recordAttempt } from './lib/buyer.js';
+import { plannedAttempts, rampThenHold } from './lib/plan.js';
+import { BASES, HOLD_S, PROBE_RATE, RATE } from './lib/settings.js';
 
 /**
  * An oversubscribed sale, in two phases (docs/PLAN.md §2.3, §11):
  *
- * - `steady`: buyers at a moderate rate, each connected over the socket, timed
- *   from POST to result — the end-to-end wait when nothing else is queued.
- *   Target: p99 under 100 ms.
- * - `rush`: the opening-second stampede, HTTP only, held at the target rate
- *   well past sellout. Most of it is turned away at the API from cache once
+ * - `steady`: buyers on the socket at `PROBE_RATE`, timed from POST to
+ *   result — the end-to-end wait when nothing else is queued. Target: p99
+ *   under 100 ms.
+ * - `rush`: the opening-second stampede, HTTP only, ramped to `RATE` and held
+ *   for `HOLD_S`, well past sellout. Most of it is turned away at the API from cache once
  *   stock is gone; the queue only sees what arrives before. A quarter of it is
  *   a buyer trying again, so the one-per-buyer path runs under load. Target:
  *   the rate held with nothing dropped and nothing failed.
@@ -21,21 +23,15 @@ import { addressFor, buy, postAttempt, recordAttempt } from './lib/buyer.js';
  * The invariants are checked by the orchestrator afterwards, in Postgres and
  * against every result the worker published, since no API exposes them.
  */
-const BASES = __ENV.BASE_URLS.split(',');
-const STEADY_RATE = Number(__ENV.STEADY_RATE || 300);
-const RUSH_RATE = Number(__ENV.RUSH_RATE || 10_000);
-const RUSH_HOLD_S = Number(__ENV.RUSH_HOLD_S || 20);
-// The rush ramps from 1 000/s over 5 s, then holds. Held means at most 1% of
-// these were dropped for want of capacity — on a laptop shared with
-// everything else, a handful always are, and zero would test the laptop.
-const RUSH_PLANNED = (5 * (1_000 + RUSH_RATE)) / 2 + RUSH_RATE * RUSH_HOLD_S;
+// Held means at most 1% of the rush was dropped for want of capacity.
+const RUSH_PLANNED = plannedAttempts(RATE, HOLD_S);
 
 export const options = {
   scenarios: {
     steady: {
       executor: 'constant-arrival-rate',
       exec: 'steady',
-      rate: STEADY_RATE,
+      rate: PROBE_RATE,
       timeUnit: '1s',
       duration: '20s',
       preAllocatedVUs: 100,
@@ -47,10 +43,7 @@ export const options = {
       startTime: '25s',
       startRate: 1_000,
       timeUnit: '1s',
-      stages: [
-        { target: RUSH_RATE, duration: '5s' },
-        { target: RUSH_RATE, duration: `${RUSH_HOLD_S}s` },
-      ],
+      stages: rampThenHold(RATE, HOLD_S),
       preAllocatedVUs: 2_000,
       maxVUs: 5_000,
     },
