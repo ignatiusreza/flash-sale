@@ -1,5 +1,5 @@
 {
-  "name": "@flash-sale/stats",
+  "name": "@flash-sale/observability",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -15,7 +15,11 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "pino": "^10.4.0"
+  },
   "devDependencies": {
-    "@types/node": "^24.19.2"
+    "@types/node": "^24.19.2",
+    "pino-pretty": "^13.2.0"
   }
 }

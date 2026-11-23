@@ -22,7 +22,9 @@ export type { ServerDeps } from './deps.js';
  */
 export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: deps.logger ?? false,
+    // The process's own logger, which writes off the request path; none in
+    // tests, which build servers by the dozen.
+    ...(deps.logger ? { loggerInstance: deps.logger } : { logger: false }),
     // Decides whether `request.ip` — which is what the rate limiter keys on —
     // comes from the socket or from `X-Forwarded-For`. Wrong in either
     // direction and the limit silently stops working: left off behind a proxy
@@ -36,9 +38,6 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     // is a schema elsewhere. `routes/orders.test.ts` fails without it.
     ajv: { customOptions: { removeAdditional: false } },
   });
-  // Set after creation, not as logger options, which would change the
-  // instance's inferred types. Each request's logger is made later, from this.
-  if (deps.logger && deps.loggerLevel) app.log.level = deps.loggerLevel;
 
   // `global: false`: only creating an order is limited, and it opts in
   // itself. `/api/sale` is polled by every open tab by design, and limiting

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
-/** How often each stack process prints where its time goes (packages/stats). */
+/** How often each stack process prints where its time goes (packages/observability). */
 export const STATS_INTERVAL_MS = 1_000;
 
 /**

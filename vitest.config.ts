@@ -13,7 +13,7 @@ export default defineConfig({
     alias: {
       '@flash-sale/core': source('core'),
       '@flash-sale/messaging': source('messaging'),
-      '@flash-sale/stats': source('stats'),
+      '@flash-sale/observability': source('observability'),
     },
   },
   test: {

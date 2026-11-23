@@ -64,7 +64,7 @@ There are only two application services, `api` and `worker`. The API serves the 
 | `TRUST_PROXY` | `false` | whose `X-Forwarded-For` to believe — see below |
 | `RATE_LIMIT_PER_MINUTE` | `60` | purchases, per address and per buyer |
 | `ORDER_LOOKUP_LIMIT_PER_MINUTE` | `120` | order lookups, per address |
-| `LOG_LEVEL` | `info` | API log level; `info` logs every request, `warn` only problems |
+| `LOG_LEVEL` | `info` | API and worker log level; at `info` the API logs every request, at `warn` only problems. Written asynchronously; readable lines under `pnpm dev` |
 | `STATS_INTERVAL_MS` | — | API and worker print where their time goes this often; the stress harness sets it |
 | `APP_ENV` | `production` | whose data: names the RabbitMQ queue and exchange — see [Environments](#environments) |
 | `CLAIM_BATCH_MAX` | `500` | worker: the most attempts settled in one claim; smaller batches form under light load anyway |

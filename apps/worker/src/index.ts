@@ -6,7 +6,7 @@ import {
   ROUTING_KEY_RESULTS,
   startBatchConsumer,
 } from '@flash-sale/messaging';
-import { startStats } from '@flash-sale/stats';
+import { createLogger, startStats } from '@flash-sale/observability';
 
 import { createPool } from './db/pool.js';
 
@@ -27,9 +27,14 @@ async function main(): Promise<void> {
   const environment = process.env.APP_ENV ?? 'production';
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   if (!rabbitUrl) throw new Error('RABBITMQ_URL is required');
+  const { logger, flush } = createLogger({
+    name: 'worker',
+    level: process.env.LOG_LEVEL ?? 'info',
+    pretty: environment === 'development',
+  });
 
   const pool = createPool(databaseUrl);
-  await migrate(pool, (message) => console.warn(message));
+  await migrate(pool, (message) => logger.info(message));
 
   const connection = await connectBroker(rabbitUrl);
   // Must match the API's, or declaring the queue fails: see QUEUE_MAX_LENGTH
@@ -41,12 +46,13 @@ async function main(): Promise<void> {
   });
   const channel = await connection.createConfirmChannel();
   const releaseBroker = onBrokerLost(connection, [channel], (reason) => {
-    console.error(`${reason}; exiting for a restart`);
+    logger.error(`${reason}; exiting for a restart`);
+    flush();
     process.exit(1);
   });
 
   const batchMax = Number(process.env.CLAIM_BATCH_MAX) || undefined;
-  // Where a batch's time goes, for the stress harness: see @flash-sale/stats.
+  // Where a batch's time goes, for the stress harness: see @flash-sale/observability.
   const statsIntervalMs = Number(process.env.STATS_INTERVAL_MS) || undefined;
   const stats = statsIntervalMs ? startStats('worker', statsIntervalMs) : undefined;
   const consumer = await startBatchConsumer({
@@ -68,10 +74,10 @@ async function main(): Promise<void> {
       // After the commit, never before: see startBatchConsumer.
       publishResults(channel, exchange, ROUTING_KEY_RESULTS, message);
     },
-    onError: (error) => console.error(error),
+    onError: (error) => logger.error(error),
   });
 
-  console.warn(`worker consuming ${queue} as ${consumer.consumerTag}`);
+  logger.info(`consuming ${queue} as ${consumer.consumerTag}`);
 
   const shutdown = async () => {
     releaseBroker();
@@ -79,6 +85,7 @@ async function main(): Promise<void> {
     await channel.close();
     await connection.close();
     await pool.end();
+    flush();
   };
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());
