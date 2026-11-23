@@ -12,14 +12,20 @@
  * in Postgres, because a load test that only reports throughput proves nothing
  * (docs/PLAN.md §1, principle 3).
  */
-import { supervisor } from './lib/stack.mjs';
+import path from 'node:path';
+
+import { ROOT, supervisor } from './lib/stack.mjs';
 import { startStack } from './stress/harness.mjs';
 import { runK6 } from './stress/k6.mjs';
 import { report } from './stress/report.mjs';
 import { scenarioNamed } from './stress/scenarios.mjs';
 
 const scenario = scenarioNamed(process.argv[2] ?? 'sale');
-const stress = supervisor('stress');
+// The stack's own output goes to a file per process, so the terminal carries
+// the run and its report and nothing else.
+const logDir = path.join(ROOT, 'tests/stress/out/logs');
+const stress = supervisor('stress', { logDir });
+stress.say(`stack output: ${path.relative(ROOT, logDir)}/`);
 
 const stack = await startStack(stress, scenario);
 const apiMemoryBefore = stack.apiMemory();
