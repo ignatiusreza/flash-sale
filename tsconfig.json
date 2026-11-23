@@ -4,6 +4,7 @@
   "references": [
     { "path": "packages/core" },
     { "path": "packages/messaging" },
+    { "path": "packages/stats" },
     { "path": "apps/api" },
     { "path": "apps/worker" }
   ]

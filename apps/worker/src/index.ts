@@ -6,9 +6,10 @@ import {
   ROUTING_KEY_RESULTS,
   startBatchConsumer,
 } from '@flash-sale/messaging';
+import { startStats } from '@flash-sale/stats';
 
 import { createPool } from './db/pool.js';
-import { startStats } from './stats.js';
+
 import { isBadAttemptData } from './claim/failures.js';
 import { handleBatch } from './claim/handler.js';
 import { migrate } from './db/migrate.js';
@@ -45,7 +46,7 @@ async function main(): Promise<void> {
   });
 
   const batchMax = Number(process.env.CLAIM_BATCH_MAX) || undefined;
-  // Where a batch's time goes, for the stress harness: see stats.ts.
+  // Where a batch's time goes, for the stress harness: see @flash-sale/stats.
   const statsIntervalMs = Number(process.env.STATS_INTERVAL_MS) || undefined;
   const stats = statsIntervalMs ? startStats('worker', statsIntervalMs) : undefined;
   const consumer = await startBatchConsumer({

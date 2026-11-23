@@ -15,6 +15,7 @@
     "@fastify/swagger-ui": "^6.1.4",
     "@flash-sale/core": "workspace:*",
     "@flash-sale/messaging": "workspace:*",
+    "@flash-sale/stats": "workspace:*",
     "@prometheus-io/client": "^0.16.1",
     "amqplib": "^2.4.0",
     "fastify": "^5.12.8",

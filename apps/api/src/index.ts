@@ -7,13 +7,13 @@ import {
   subscribeToEvents,
   type PurchaseResultsMessage,
 } from '@flash-sale/messaging';
+import { startStats } from '@flash-sale/stats';
 import pg from 'pg';
 
 import { loadConfig, testEndpointsEnabled } from './config.js';
 import { createGateway } from './realtime/gateway.js';
 import { SaleCache } from './sale/cache.js';
 import { buildServer } from './server.js';
-import { startStats } from './stats.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();

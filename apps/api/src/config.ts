@@ -31,7 +31,7 @@ const schema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   /**
    * Prints where this process's time goes every so many milliseconds, for the
-   * stress harness (`stats.ts`). Unset, nothing is measured.
+   * stress harness (`@flash-sale/stats`). Unset, nothing is measured.
    */
   STATS_INTERVAL_MS: z.coerce.number().int().positive().optional(),
   /**
