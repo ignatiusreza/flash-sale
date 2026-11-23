@@ -1,4 +1,4 @@
-import { checkLoad, checkSale, checkShedding } from './checks.mjs';
+import { checkCapacity, checkLoad, checkSale, checkShedding } from './checks.mjs';
 
 /**
  * Every scenario takes the same settings, and each can be overridden from the
@@ -53,7 +53,7 @@ export const SCENARIOS = {
   capacity: {
     defaults: { rate: 20_000, holdS: 30, stock: 10_000_000 },
     worker: 'from the start',
-    check: async () => [],
+    check: checkCapacity,
   },
 };
 

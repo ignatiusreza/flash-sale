@@ -9,10 +9,14 @@ const K6_IMAGE = 'grafana/k6:2.3.0';
 const CONTAINER = 'flash-sale-stress-k6';
 const OUT = path.join(ROOT, 'tests/stress/out');
 
+/** k6's exit code when the run completed but a threshold was crossed. */
+const THRESHOLDS_CROSSED = 99;
+
 /**
  * Runs `tests/stress/<scenario>.js` in k6's container against `baseUrls`.
  * k6 is AGPL: it runs as its own program over the wire, never linked in.
- * Resolves whether its thresholds passed, and the summary it wrote.
+ * Resolves the summary it wrote; which thresholds held is read from that.
+ * Any other failure of k6 rejects, with the end of its log shown.
  */
 export async function runK6(stress, scenario, baseUrls) {
   mkdirSync(OUT, { recursive: true });
@@ -24,34 +28,28 @@ export async function runK6(stress, scenario, baseUrls) {
   const env = { BASE_URLS: baseUrls.join(','), ...scenario.k6Env };
 
   stress.say(`running k6 (${scenario.name})…`);
-  const passed = await stress
-    .run(
-      'docker',
-      [
-        'run',
-        '--rm',
-        `--name=${CONTAINER}`,
-        '--network=host',
-        // As us, so the summary it writes into OUT is ours to read and delete.
-        `--user=${process.getuid()}:${process.getgid()}`,
-        '-v',
-        `${path.join(ROOT, 'tests/stress')}:/scripts:ro`,
-        '-v',
-        `${OUT}:/out`,
-        ...Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
-        K6_IMAGE,
-        'run',
-        '--quiet',
-        `/scripts/${scenario.name}.js`,
-      ],
-      {},
-      { logAs: 'k6' },
-    )
-    .then(
-      () => true,
-      () => false,
-    );
+  await stress.run(
+    'docker',
+    [
+      'run',
+      '--rm',
+      `--name=${CONTAINER}`,
+      '--network=host',
+      // As us, so the summary it writes into OUT is ours to read and delete.
+      `--user=${process.getuid()}:${process.getgid()}`,
+      '-v',
+      `${path.join(ROOT, 'tests/stress')}:/scripts:ro`,
+      '-v',
+      `${OUT}:/out`,
+      ...Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
+      K6_IMAGE,
+      'run',
+      '--quiet',
+      `/scripts/${scenario.name}.js`,
+    ],
+    {},
+    { logAs: 'k6', answers: [0, THRESHOLDS_CROSSED] },
+  );
 
-  const summary = JSON.parse(readFileSync(path.join(OUT, 'summary.json'), 'utf8'));
-  return { passed, summary };
+  return JSON.parse(readFileSync(path.join(OUT, 'summary.json'), 'utf8'));
 }

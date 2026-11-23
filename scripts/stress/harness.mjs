@@ -106,6 +106,16 @@ export async function startStack(stress, scenario) {
         )
       )[0],
 
+    /** Orders taken, and the seconds between the first and the last. */
+    claimSpan: async () =>
+      (
+        await query(
+          `SELECT count(*)::int AS orders,
+                  coalesce(extract(epoch FROM max(created_at) - min(created_at)), 0)::float AS seconds
+           FROM orders WHERE sale_id = 'flash'`,
+        )
+      )[0],
+
     /** Each buyer's order, by user id. */
     heldOrders: async () =>
       new Map(

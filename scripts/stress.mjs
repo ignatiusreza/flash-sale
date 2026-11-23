@@ -15,6 +15,7 @@
 import path from 'node:path';
 
 import { ROOT, supervisor } from './lib/stack.mjs';
+import { thresholdVerdicts } from './stress/checks.mjs';
 import { startStack } from './stress/harness.mjs';
 import { runK6 } from './stress/k6.mjs';
 import { report } from './stress/report.mjs';
@@ -29,19 +30,17 @@ stress.say(`stack output: ${path.relative(ROOT, logDir)}/`);
 
 const stack = await startStack(stress, scenario);
 const apiMemoryBefore = stack.apiMemory();
-const k6 = await runK6(stress, scenario, stack.baseUrls);
+const summary = await runK6(stress, scenario, stack.baseUrls);
 
-const verdicts = [
-  { name: 'k6 thresholds', pass: k6.passed },
-  ...(await scenario.check({
-    scenario,
-    summary: k6.summary,
-    stack,
-    apiMemoryBefore,
-    say: stress.say,
-  })),
-];
-report(stress.say, k6.summary, verdicts);
+const { notes, verdicts } = await scenario.check({
+  scenario,
+  summary,
+  stack,
+  apiMemoryBefore,
+  say: stress.say,
+});
+const all = [...thresholdVerdicts(summary), ...verdicts];
+report(stress.say, summary, { notes, verdicts: all });
 
 await stack.close();
-await stress.shutdown(verdicts.every((verdict) => verdict.pass) ? 0 : 1);
+await stress.shutdown(all.every((verdict) => verdict.pass) ? 0 : 1);

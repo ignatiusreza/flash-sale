@@ -94,8 +94,10 @@ export function supervisor(name, { logDir } = {}) {
   /**
    * Runs a setup step to completion: its output inherited, or with `logDir`
    * appended to `<logAs>.log` — and the end of that shown if the step fails.
+   * Resolves the exit code; codes in `answers` are results to read, not
+   * failures, so they resolve too and show nothing.
    */
-  function run(command, args, env = {}, { logAs = 'setup' } = {}) {
+  function run(command, args, env = {}, { logAs = 'setup', answers = [0] } = {}) {
     const log = logDir ? logFile(logAs) : undefined;
     if (log) writeSync(log.fd, `$ ${command} ${args.join(' ')}\n`);
 
@@ -107,7 +109,7 @@ export function supervisor(name, { logDir } = {}) {
       });
       child.on('error', reject);
       child.on('exit', (code) => {
-        if (code === 0) return resolve();
+        if (answers.includes(code)) return resolve(code);
         if (log) {
           say(name, `${command} exited with ${code}; the end of ${relative(log.file)}:`);
           for (const line of tail(log.file)) say(name, `  ${line}`);
